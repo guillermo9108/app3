@@ -13,12 +13,14 @@ import {
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
+import { Ionicons } from '@expo/vector-icons';
 
 export default function Config() {
   const router = useRouter();
   const [serverUrl, setServerUrl] = useState('http://192.168.43.101');
   const [streamingPort, setStreamingPort] = useState('3001');
   const [isLoading, setIsLoading] = useState(false);
+  const [hasExistingConfig, setHasExistingConfig] = useState(false);
 
   useEffect(() => {
     loadSavedConfig();
