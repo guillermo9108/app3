@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "StreamPay",
-    "slug": "streampay",
+    "slug": "streampay3",
     "version": "2.1.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
@@ -10,27 +10,17 @@
     "backgroundColor": "#0f172a",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/images/splash-icon.png",
+      "image": "./assets/images/splash-image.png",
       "resizeMode": "contain",
       "backgroundColor": "#0f172a"
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.streampay.app",
-      "infoPlist": {
-        "NSCameraUsageDescription": "Captura fotos para el marketplace",
-        "NSPhotoLibraryUsageDescription": "Comparte fotos en el marketplace",
-        "NSMicrophoneUsageDescription": "Graba audio para compartir",
-        "UIViewControllerBasedStatusBarAppearance": true,
-        "UIBackgroundModes": ["audio", "fetch"],
-        "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": true
-        }
-      }
+      "bundleIdentifier": "com.streampay.app"
     },
     "android": {
       "package": "com.streampay.app",
-      "versionCode": 3,
+      "versionCode": 7,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0f172a"
@@ -40,71 +30,27 @@
         "ACCESS_NETWORK_STATE",
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE",
-        "FOREGROUND_SERVICE",
-        "WAKE_LOCK",
-        "RECEIVE_BOOT_COMPLETED",
-        "VIBRATE"
+        "WRITE_EXTERNAL_STORAGE"
       ],
       "usesCleartextTraffic": true,
-      "edgeToEdgeEnabled": true,
-      "allowBackup": true,
-      "softwareKeyboardLayoutMode": "pan",
-      "intentFilters": [
-        {
-          "action": "VIEW",
-          "data": [
-            {
-              "scheme": "http"
-            },
-            {
-              "scheme": "https"
-            }
-          ],
-          "category": ["BROWSABLE", "DEFAULT"]
-        }
-      ]
-    },
-    "web": {
-      "bundler": "metro",
-      "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "edgeToEdgeEnabled": true
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-icon.png",
+          "image": "./assets/images/splash-image.png",
           "imageWidth": 200,
           "resizeMode": "contain",
           "backgroundColor": "#0f172a"
         }
-      ],
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/images/notification-icon.png",
-          "color": "#6366f1",
-          "sounds": [],
-          "mode": "production"
-        }
-      ],
-      "expo-screen-orientation"
+      ]
     ],
-    "experiments": {
-      "typedRoutes": true
-    },
     "extra": {
       "eas": {
-        "projectId": "your-project-id"
+        "projectId": "ff99e107-f144-4222-b3fa-d902c4f9f59f"
       }
-    },
-    "notification": {
-      "icon": "./assets/images/notification-icon.png",
-      "color": "#6366f1",
-      "androidMode": "default",
-      "androidCollapsedTitle": "StreamPay"
     }
   }
 }
