@@ -31,6 +31,8 @@ export default function WebViewScreen() {
   const [canGoBack, setCanGoBack] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [showFab, setShowFab] = useState(false);
+  const hideTimeout = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     loadServerUrl();
@@ -43,10 +45,29 @@ export default function WebViewScreen() {
 
     return () => {
       backHandler.remove();
+      if (hideTimeout.current) {
+        clearTimeout(hideTimeout.current);
+      }
       // Restaurar orientación al salir
       ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
     };
   }, [canGoBack]);
+
+  // Mostrar FAB temporalmente
+  const showFabTemporarily = () => {
+    setShowFab(true);
+    
+    // Limpiar timeout anterior si existe
+    if (hideTimeout.current) {
+      clearTimeout(hideTimeout.current);
+    }
+    
+    // Ocultar después de 3 segundos
+    hideTimeout.current = setTimeout(() => {
+      setShowFab(false);
+      setShowMenu(false);
+    }, 3000);
+  };
 
   const setupNotifications = async () => {
     // Solicitar permisos de notificaciones
@@ -104,6 +125,11 @@ export default function WebViewScreen() {
   const handleMessage = async (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
+      
+      // Mostrar FAB cuando el usuario interactúa
+      if (data.type === 'userInteraction') {
+        showFabTemporarily();
+      }
       
       // Manejar fullscreen
       if (data.type === 'fullscreenchange') {
@@ -213,6 +239,30 @@ export default function WebViewScreen() {
   // JavaScript que se inyecta en el WebView
   const injectedJavaScript = `
     (function() {
+      // Mostrar FAB con interacciones del usuario
+      let interactionTimeout;
+      const notifyInteraction = () => {
+        clearTimeout(interactionTimeout);
+        interactionTimeout = setTimeout(() => {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'userInteraction'
+          }));
+        }, 100);
+      };
+
+      // Detectar scroll
+      let lastScroll = 0;
+      window.addEventListener('scroll', () => {
+        const currentScroll = window.pageYOffset;
+        if (Math.abs(currentScroll - lastScroll) > 50) {
+          notifyInteraction();
+          lastScroll = currentScroll;
+        }
+      }, { passive: true });
+
+      // Detectar touch
+      document.addEventListener('touchstart', notifyInteraction, { passive: true });
+
       // Detectar cambios de fullscreen
       document.addEventListener('fullscreenchange', function() {
         window.ReactNativeWebView.postMessage(JSON.stringify({
@@ -320,11 +370,17 @@ export default function WebViewScreen() {
         }}
       />
 
-      {/* Floating Action Button - Solo visible cuando NO está en fullscreen */}
-      {!isFullscreen && (
+      {/* Floating Action Button - Se muestra temporalmente */}
+      {!isFullscreen && showFab && (
         <TouchableOpacity
           style={styles.fab}
-          onPress={() => setShowMenu(!showMenu)}
+          onPress={() => {
+            setShowMenu(!showMenu);
+            // Mantener visible mientras el menú está abierto
+            if (hideTimeout.current) {
+              clearTimeout(hideTimeout.current);
+            }
+          }}
         >
           <Ionicons name="ellipsis-vertical" size={24} color="#ffffff" />
         </TouchableOpacity>
