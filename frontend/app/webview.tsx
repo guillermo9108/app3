@@ -4,40 +4,64 @@ import {
   StyleSheet,
   BackHandler,
   Alert,
-  TouchableOpacity,
-  Text,
-  ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
-import { Ionicons } from '@expo/vector-icons';
+import * as ScreenOrientation from 'expo-screen-orientation';
+import * as Notifications from 'expo-notifications';
+import * as FileSystem from 'expo-file-system';
+
+// Configurar notificaciones
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
 
 export default function WebViewScreen() {
   const webViewRef = useRef<WebView>(null);
   const router = useRouter();
   const [serverUrl, setServerUrl] = useState('');
+  const [streamingPort, setStreamingPort] = useState('3001');
   const [canGoBack, setCanGoBack] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
     loadServerUrl();
+    setupNotifications();
     
     const backHandler = BackHandler.addEventListener(
       'hardwareBackPress',
       handleBackPress
     );
 
-    return () => backHandler.remove();
+    return () => {
+      backHandler.remove();
+      // Restaurar orientación al salir
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
+    };
   }, [canGoBack]);
+
+  const setupNotifications = async () => {
+    // Solicitar permisos de notificaciones
+    const { status } = await Notifications.requestPermissionsAsync();
+    if (status !== 'granted') {
+      console.log('Permission for notifications not granted');
+    }
+  };
 
   const loadServerUrl = async () => {
     try {
       const url = await AsyncStorage.getItem('SERVER_URL');
+      const port = await AsyncStorage.getItem('STREAMING_PORT');
       if (url) {
         setServerUrl(url);
+        if (port) setStreamingPort(port);
       } else {
         router.replace('/config');
       }
@@ -48,6 +72,11 @@ export default function WebViewScreen() {
   };
 
   const handleBackPress = () => {
+    if (isFullscreen) {
+      // Si está en fullscreen, salir de fullscreen primero
+      exitFullscreen();
+      return true;
+    }
     if (canGoBack && webViewRef.current) {
       webViewRef.current.goBack();
       return true;
@@ -55,130 +84,240 @@ export default function WebViewScreen() {
     return false;
   };
 
+  const exitFullscreen = () => {
+    // Enviar mensaje al WebView para salir de fullscreen
+    webViewRef.current?.injectJavaScript(`
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else if (document.webkitFullscreenElement) {
+        document.webkitExitFullscreen();
+      }
+      true;
+    `);
+  };
+
   const handleNavigationStateChange = (navState: any) => {
     setCanGoBack(navState.canGoBack);
   };
 
-  const handleError = () => {
-    setLoadError(true);
-    Alert.alert(
-      'Error de Conexión',
-      'No se pudo conectar al servidor. Verifica que:\n\n• El servidor esté activo\n• Estés en la misma red\n• La URL sea correcta',
-      [
-        {
-          text: 'Reintentar',
-          onPress: () => {
-            setLoadError(false);
-            webViewRef.current?.reload();
-          },
-        },
-        {
-          text: 'Cambiar Configuración',
-          onPress: () => router.push('/config'),
-        },
-      ]
-    );
+  const handleMessage = async (event: any) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      
+      // Manejar fullscreen
+      if (data.type === 'fullscreenchange') {
+        setIsFullscreen(data.isFullscreen);
+        if (data.isFullscreen) {
+          // Permitir todas las orientaciones en fullscreen
+          await ScreenOrientation.unlockAsync();
+        } else {
+          // Volver a portrait cuando no está en fullscreen
+          await ScreenOrientation.lockAsync(
+            ScreenOrientation.OrientationLock.PORTRAIT
+          );
+        }
+      }
+      
+      // Manejar descargas
+      if (data.type === 'download') {
+        handleDownload(data.url, data.filename);
+      }
+      
+      // Manejar notificaciones de audio
+      if (data.type === 'audio') {
+        if (data.action === 'playing') {
+          showAudioNotification(data.title, data.artist);
+        } else if (data.action === 'paused') {
+          await Notifications.dismissAllNotificationsAsync();
+        }
+      }
+    } catch (error) {
+      console.error('Error handling message:', error);
+    }
   };
 
-  const handleSettings = () => {
-    Alert.alert(
-      'Configuración',
-      '¿Qué deseas hacer?',
-      [
-        {
-          text: 'Recargar Página',
-          onPress: () => webViewRef.current?.reload(),
+  const handleDownload = async (url: string, filename: string) => {
+    try {
+      // Mostrar notificación de inicio de descarga
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '📥 Descargando',
+          body: filename,
+          data: { url, filename },
         },
-        {
-          text: 'Cambiar Servidor',
-          onPress: () => router.push('/config'),
+        trigger: null,
+      });
+
+      const downloadResumable = FileSystem.createDownloadResumable(
+        url,
+        FileSystem.documentDirectory + filename,
+        {},
+        (downloadProgress) => {
+          const progress =
+            downloadProgress.totalBytesWritten /
+            downloadProgress.totalBytesExpectedToWrite;
+          
+          // Actualizar notificación con progreso
+          if (progress > 0 && progress < 1) {
+            Notifications.scheduleNotificationAsync({
+              content: {
+                title: '📥 Descargando',
+                body: `${filename} - ${Math.round(progress * 100)}%`,
+                data: { url, filename, progress },
+              },
+              trigger: null,
+            });
+          }
+        }
+      );
+
+      const result = await downloadResumable.downloadAsync();
+      
+      if (result) {
+        // Notificación de descarga completa
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: '✅ Descarga completa',
+            body: filename,
+            data: { url, filename, uri: result.uri },
+          },
+          trigger: null,
+        });
+      }
+    } catch (error) {
+      console.error('Download error:', error);
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '❌ Error en descarga',
+          body: filename,
         },
-        {
-          text: 'Cancelar',
-          style: 'cancel',
-        },
-      ]
-    );
+        trigger: null,
+      });
+    }
   };
+
+  const showAudioNotification = async (title: string, artist: string) => {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: '🎵 Reproduciendo',
+        body: `${title}${artist ? ` - ${artist}` : ''}`,
+        sound: false,
+        priority: Notifications.AndroidNotificationPriority.HIGH,
+        sticky: true,
+      },
+      trigger: null,
+    });
+  };
+
+  // JavaScript que se inyecta en el WebView
+  const injectedJavaScript = `
+    (function() {
+      // Detectar cambios de fullscreen
+      document.addEventListener('fullscreenchange', function() {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'fullscreenchange',
+          isFullscreen: !!document.fullscreenElement
+        }));
+      });
+      
+      document.addEventListener('webkitfullscreenchange', function() {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'fullscreenchange',
+          isFullscreen: !!document.webkitFullscreenElement
+        }));
+      });
+
+      // Interceptar descargas
+      document.addEventListener('click', function(e) {
+        const target = e.target.closest('a[download], a[href*="/download"]');
+        if (target) {
+          e.preventDefault();
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'download',
+            url: target.href,
+            filename: target.download || target.href.split('/').pop()
+          }));
+        }
+      }, true);
+
+      // Detectar reproducción de audio
+      document.addEventListener('play', function(e) {
+        if (e.target.tagName === 'AUDIO' || e.target.tagName === 'VIDEO') {
+          const title = e.target.title || e.target.getAttribute('data-title') || 'Audio';
+          const artist = e.target.getAttribute('data-artist') || '';
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'audio',
+            action: 'playing',
+            title: title,
+            artist: artist
+          }));
+        }
+      }, true);
+
+      document.addEventListener('pause', function(e) {
+        if (e.target.tagName === 'AUDIO' || e.target.tagName === 'VIDEO') {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'audio',
+            action: 'paused'
+          }));
+        }
+      }, true);
+
+      // Mejorar soporte para videos en fullscreen
+      const videos = document.querySelectorAll('video');
+      videos.forEach(video => {
+        video.addEventListener('dblclick', function() {
+          if (this.requestFullscreen) {
+            this.requestFullscreen();
+          } else if (this.webkitRequestFullscreen) {
+            this.webkitRequestFullscreen();
+          }
+        });
+      });
+    })();
+    true;
+  `;
 
   if (!serverUrl) {
-    return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color="#6366f1" />
-      </View>
-    );
+    return <View style={styles.container} />;
   }
 
   return (
     <View style={styles.container}>
-      <StatusBar style="light" />
+      <StatusBar style="light" hidden={isFullscreen} />
       
-      {/* Top Bar */}
-      <View style={styles.topBar}>
-        <View style={styles.topBarContent}>
-          <View style={styles.logoMini}>
-            <Text style={styles.logoMiniText}>SP</Text>
-          </View>
-          <TouchableOpacity
-            style={styles.settingsButton}
-            onPress={handleSettings}
-          >
-            <Ionicons name="settings-outline" size={24} color="#e2e8f0" />
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* WebView */}
+      {/* WebView sin barra superior */}
       <WebView
         ref={webViewRef}
         source={{ uri: serverUrl }}
         style={styles.webview}
         onNavigationStateChange={handleNavigationStateChange}
-        onError={handleError}
-        onLoadStart={() => setIsLoading(true)}
-        onLoadEnd={() => setIsLoading(false)}
+        onMessage={handleMessage}
+        injectedJavaScript={injectedJavaScript}
         // Configuración crítica para StreamPay
         javaScriptEnabled={true}
         domStorageEnabled={true}
         allowFileAccess={true}
         mediaPlaybackRequiresUserAction={false}
+        allowsFullscreenVideo={true}
+        allowsInlineMediaPlayback={true}
         mixedContentMode="always"
         // User Agent personalizado
-        userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 StreamPayAPK/1.0"
+        userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 StreamPayAPK/2.0"
         // Mejoras de rendimiento
         cacheEnabled={true}
         incognito={false}
         // Android specific
         androidLayerType="hardware"
         androidHardwareAccelerationDisabled={false}
+        // Permitir apertura de ventanas
+        setSupportMultipleWindows={false}
+        // Gestión de menú contextual
+        onShouldStartLoadWithRequest={(request) => {
+          // Permitir navegación dentro del dominio
+          return true;
+        }}
       />
-
-      {/* Loading Indicator */}
-      {isLoading && (
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#6366f1" />
-        </View>
-      )}
-
-      {/* Error View */}
-      {loadError && (
-        <View style={styles.errorContainer}>
-          <Ionicons name="cloud-offline-outline" size={64} color="#64748b" />
-          <Text style={styles.errorTitle}>Sin Conexión</Text>
-          <Text style={styles.errorText}>
-            No se pudo conectar al servidor
-          </Text>
-          <TouchableOpacity
-            style={styles.retryButton}
-            onPress={() => {
-              setLoadError(false);
-              webViewRef.current?.reload();
-            }}
-          >
-            <Text style={styles.retryButtonText}>Reintentar</Text>
-          </TouchableOpacity>
-        </View>
-      )}
     </View>
   );
 }
@@ -188,82 +327,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0f172a',
   },
-  topBar: {
-    backgroundColor: '#0f172a',
-    paddingTop: 44,
-    paddingBottom: 12,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1e293b',
-  },
-  topBarContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  logoMini: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#6366f1',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoMiniText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#ffffff',
-  },
-  settingsButton: {
-    padding: 8,
-  },
   webview: {
     flex: 1,
     backgroundColor: '#0f172a',
-  },
-  loadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#0f172a',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  errorContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#0f172a',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  errorTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#e2e8f0',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  errorText: {
-    fontSize: 16,
-    color: '#94a3b8',
-    textAlign: 'center',
-    marginBottom: 24,
-  },
-  retryButton: {
-    backgroundColor: '#6366f1',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 32,
-  },
-  retryButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#ffffff',
   },
 });
