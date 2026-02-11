@@ -4,7 +4,8 @@ import {
   StyleSheet,
   BackHandler,
   Alert,
-  Platform,
+  TouchableOpacity,
+  Text,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useRouter } from 'expo-router';
@@ -13,6 +14,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import * as Notifications from 'expo-notifications';
 import * as FileSystem from 'expo-file-system';
+import { Ionicons } from '@expo/vector-icons';
 
 // Configurar notificaciones
 Notifications.setNotificationHandler({
@@ -27,7 +29,6 @@ export default function WebViewScreen() {
   const webViewRef = useRef<WebView>(null);
   const router = useRouter();
   const [serverUrl, setServerUrl] = useState('');
-  const [streamingPort, setStreamingPort] = useState('3001');
   const [canGoBack, setCanGoBack] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -48,21 +49,17 @@ export default function WebViewScreen() {
       if (hideTimeout.current) {
         clearTimeout(hideTimeout.current);
       }
-      // Restaurar orientación al salir
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT).catch(() => {});
     };
   }, [canGoBack]);
 
-  // Mostrar FAB temporalmente
   const showFabTemporarily = () => {
     setShowFab(true);
     
-    // Limpiar timeout anterior si existe
     if (hideTimeout.current) {
       clearTimeout(hideTimeout.current);
     }
     
-    // Ocultar después de 3 segundos
     hideTimeout.current = setTimeout(() => {
       setShowFab(false);
       setShowMenu(false);
@@ -70,20 +67,18 @@ export default function WebViewScreen() {
   };
 
   const setupNotifications = async () => {
-    // Solicitar permisos de notificaciones
-    const { status } = await Notifications.requestPermissionsAsync();
-    if (status !== 'granted') {
-      console.log('Permission for notifications not granted');
+    try {
+      await Notifications.requestPermissionsAsync();
+    } catch (error) {
+      console.log('Notifications permission error:', error);
     }
   };
 
   const loadServerUrl = async () => {
     try {
       const url = await AsyncStorage.getItem('SERVER_URL');
-      const port = await AsyncStorage.getItem('STREAMING_PORT');
       if (url) {
         setServerUrl(url);
-        if (port) setStreamingPort(port);
       } else {
         router.replace('/config');
       }
@@ -95,7 +90,6 @@ export default function WebViewScreen() {
 
   const handleBackPress = () => {
     if (isFullscreen) {
-      // Si está en fullscreen, salir de fullscreen primero
       exitFullscreen();
       return true;
     }
@@ -107,13 +101,14 @@ export default function WebViewScreen() {
   };
 
   const exitFullscreen = () => {
-    // Enviar mensaje al WebView para salir de fullscreen
     webViewRef.current?.injectJavaScript(`
-      if (document.fullscreenElement) {
-        document.exitFullscreen();
-      } else if (document.webkitFullscreenElement) {
-        document.webkitExitFullscreen();
-      }
+      try {
+        if (document.fullscreenElement) {
+          document.exitFullscreen();
+        } else if (document.webkitFullscreenElement) {
+          document.webkitExitFullscreen();
+        }
+      } catch(e) {}
       true;
     `);
   };
@@ -126,31 +121,23 @@ export default function WebViewScreen() {
     try {
       const data = JSON.parse(event.nativeEvent.data);
       
-      // Mostrar FAB cuando el usuario interactúa
       if (data.type === 'userInteraction') {
         showFabTemporarily();
       }
       
-      // Manejar fullscreen
       if (data.type === 'fullscreenchange') {
         setIsFullscreen(data.isFullscreen);
         if (data.isFullscreen) {
-          // Permitir todas las orientaciones en fullscreen
           await ScreenOrientation.unlockAsync();
         } else {
-          // Volver a portrait cuando no está en fullscreen
-          await ScreenOrientation.lockAsync(
-            ScreenOrientation.OrientationLock.PORTRAIT
-          );
+          await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
         }
       }
       
-      // Manejar descargas
       if (data.type === 'download') {
         handleDownload(data.url, data.filename);
       }
       
-      // Manejar notificaciones de audio
       if (data.type === 'audio') {
         if (data.action === 'playing') {
           showAudioNotification(data.title, data.artist);
@@ -159,18 +146,16 @@ export default function WebViewScreen() {
         }
       }
     } catch (error) {
-      console.error('Error handling message:', error);
+      // Ignorar errores de parsing
     }
   };
 
   const handleDownload = async (url: string, filename: string) => {
     try {
-      // Mostrar notificación de inicio de descarga
       await Notifications.scheduleNotificationAsync({
         content: {
           title: '📥 Descargando',
           body: filename,
-          data: { url, filename },
         },
         trigger: null,
       });
@@ -184,13 +169,11 @@ export default function WebViewScreen() {
             downloadProgress.totalBytesWritten /
             downloadProgress.totalBytesExpectedToWrite;
           
-          // Actualizar notificación con progreso
           if (progress > 0 && progress < 1) {
             Notifications.scheduleNotificationAsync({
               content: {
                 title: '📥 Descargando',
                 body: `${filename} - ${Math.round(progress * 100)}%`,
-                data: { url, filename, progress },
               },
               trigger: null,
             });
@@ -201,18 +184,15 @@ export default function WebViewScreen() {
       const result = await downloadResumable.downloadAsync();
       
       if (result) {
-        // Notificación de descarga completa
         await Notifications.scheduleNotificationAsync({
           content: {
             title: '✅ Descarga completa',
             body: filename,
-            data: { url, filename, uri: result.uri },
           },
           trigger: null,
         });
       }
     } catch (error) {
-      console.error('Download error:', error);
       await Notifications.scheduleNotificationAsync({
         content: {
           title: '❌ Error en descarga',
@@ -224,107 +204,119 @@ export default function WebViewScreen() {
   };
 
   const showAudioNotification = async (title: string, artist: string) => {
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: '🎵 Reproduciendo',
-        body: `${title}${artist ? ` - ${artist}` : ''}`,
-        sound: false,
-        priority: Notifications.AndroidNotificationPriority.HIGH,
-        sticky: true,
-      },
-      trigger: null,
-    });
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '🎵 Reproduciendo',
+          body: `${title}${artist ? ` - ${artist}` : ''}`,
+          sound: false,
+          priority: Notifications.AndroidNotificationPriority.HIGH,
+          sticky: true,
+        },
+        trigger: null,
+      });
+    } catch (error) {
+      console.log('Audio notification error:', error);
+    }
   };
 
-  // JavaScript que se inyecta en el WebView
+  const clearCache = async () => {
+    Alert.alert(
+      'Limpiar Caché',
+      '¿Deseas limpiar el caché y el historial de descargas?',
+      [
+        {
+          text: 'Cancelar',
+          style: 'cancel',
+        },
+        {
+          text: 'Limpiar',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Limpiar caché del WebView
+              webViewRef.current?.clearCache?.(true);
+              
+              // Limpiar archivos descargados
+              const downloadDir = FileSystem.documentDirectory;
+              if (downloadDir) {
+                const files = await FileSystem.readDirectoryAsync(downloadDir);
+                for (const file of files) {
+                  try {
+                    await FileSystem.deleteAsync(downloadDir + file, { idempotent: true });
+                  } catch (e) {}
+                }
+              }
+              
+              // Limpiar notificaciones
+              await Notifications.dismissAllNotificationsAsync();
+              
+              Alert.alert('Éxito', 'Caché limpiado correctamente');
+              
+              // Recargar página
+              webViewRef.current?.reload();
+            } catch (error) {
+              Alert.alert('Error', 'No se pudo limpiar el caché completamente');
+            }
+            setShowMenu(false);
+          },
+        },
+      ]
+    );
+  };
+
+  // JavaScript simplificado y seguro
   const injectedJavaScript = `
     (function() {
-      // Mostrar FAB con interacciones del usuario
-      let interactionTimeout;
-      const notifyInteraction = () => {
-        clearTimeout(interactionTimeout);
-        interactionTimeout = setTimeout(() => {
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'userInteraction'
-          }));
-        }, 100);
-      };
+      try {
+        let interactionTimeout;
+        const notifyInteraction = () => {
+          clearTimeout(interactionTimeout);
+          interactionTimeout = setTimeout(() => {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'userInteraction'
+            }));
+          }, 100);
+        };
 
-      // Detectar scroll
-      let lastScroll = 0;
-      window.addEventListener('scroll', () => {
-        const currentScroll = window.pageYOffset;
-        if (Math.abs(currentScroll - lastScroll) > 50) {
-          notifyInteraction();
-          lastScroll = currentScroll;
-        }
-      }, { passive: true });
-
-      // Detectar touch
-      document.addEventListener('touchstart', notifyInteraction, { passive: true });
-
-      // Detectar cambios de fullscreen
-      document.addEventListener('fullscreenchange', function() {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'fullscreenchange',
-          isFullscreen: !!document.fullscreenElement
-        }));
-      });
-      
-      document.addEventListener('webkitfullscreenchange', function() {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'fullscreenchange',
-          isFullscreen: !!document.webkitFullscreenElement
-        }));
-      });
-
-      // Interceptar descargas
-      document.addEventListener('click', function(e) {
-        const target = e.target.closest('a[download], a[href*="/download"]');
-        if (target) {
-          e.preventDefault();
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'download',
-            url: target.href,
-            filename: target.download || target.href.split('/').pop()
-          }));
-        }
-      }, true);
-
-      // Detectar reproducción de audio
-      document.addEventListener('play', function(e) {
-        if (e.target.tagName === 'AUDIO' || e.target.tagName === 'VIDEO') {
-          const title = e.target.title || e.target.getAttribute('data-title') || 'Audio';
-          const artist = e.target.getAttribute('data-artist') || '';
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'audio',
-            action: 'playing',
-            title: title,
-            artist: artist
-          }));
-        }
-      }, true);
-
-      document.addEventListener('pause', function(e) {
-        if (e.target.tagName === 'AUDIO' || e.target.tagName === 'VIDEO') {
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'audio',
-            action: 'paused'
-          }));
-        }
-      }, true);
-
-      // Mejorar soporte para videos en fullscreen
-      const videos = document.querySelectorAll('video');
-      videos.forEach(video => {
-        video.addEventListener('dblclick', function() {
-          if (this.requestFullscreen) {
-            this.requestFullscreen();
-          } else if (this.webkitRequestFullscreen) {
-            this.webkitRequestFullscreen();
+        let lastScroll = 0;
+        window.addEventListener('scroll', () => {
+          const currentScroll = window.pageYOffset || 0;
+          if (Math.abs(currentScroll - lastScroll) > 50) {
+            notifyInteraction();
+            lastScroll = currentScroll;
           }
+        }, { passive: true });
+
+        document.addEventListener('touchstart', notifyInteraction, { passive: true });
+
+        document.addEventListener('fullscreenchange', function() {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'fullscreenchange',
+            isFullscreen: !!document.fullscreenElement
+          }));
         });
-      });
+        
+        document.addEventListener('webkitfullscreenchange', function() {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'fullscreenchange',
+            isFullscreen: !!document.webkitFullscreenElement
+          }));
+        });
+
+        const videos = document.querySelectorAll('video');
+        videos.forEach(video => {
+          video.addEventListener('dblclick', function() {
+            if (this.requestFullscreen) {
+              this.requestFullscreen();
+            } else if (this.webkitRequestFullscreen) {
+              this.webkitRequestFullscreen();
+            }
+          });
+        });
+      } catch(e) {
+        console.log('Injection error:', e);
+      }
     })();
     true;
   `;
@@ -337,7 +329,6 @@ export default function WebViewScreen() {
     <View style={styles.container}>
       <StatusBar style="light" hidden={isFullscreen} />
       
-      {/* WebView sin barra superior */}
       <WebView
         ref={webViewRef}
         source={{ uri: serverUrl }}
@@ -345,7 +336,14 @@ export default function WebViewScreen() {
         onNavigationStateChange={handleNavigationStateChange}
         onMessage={handleMessage}
         injectedJavaScript={injectedJavaScript}
-        // Configuración crítica para StreamPay
+        onError={(syntheticEvent) => {
+          const { nativeEvent } = syntheticEvent;
+          console.warn('WebView error: ', nativeEvent);
+        }}
+        onHttpError={(syntheticEvent) => {
+          const { nativeEvent } = syntheticEvent;
+          console.warn('HTTP error: ', nativeEvent);
+        }}
         javaScriptEnabled={true}
         domStorageEnabled={true}
         allowFileAccess={true}
@@ -353,30 +351,26 @@ export default function WebViewScreen() {
         allowsFullscreenVideo={true}
         allowsInlineMediaPlayback={true}
         mixedContentMode="always"
-        // User Agent personalizado
-        userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 StreamPayAPK/2.0"
-        // Mejoras de rendimiento
+        userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 StreamPayAPK/2.1"
         cacheEnabled={true}
+        cacheMode="LOAD_CACHE_ELSE_NETWORK"
         incognito={false}
-        // Android specific
         androidLayerType="hardware"
         androidHardwareAccelerationDisabled={false}
-        // Permitir apertura de ventanas
         setSupportMultipleWindows={false}
-        // Gestión de menú contextual
-        onShouldStartLoadWithRequest={(request) => {
-          // Permitir navegación dentro del dominio
-          return true;
-        }}
+        startInLoadingState={true}
+        renderLoading={() => (
+          <View style={styles.loadingContainer}>
+            <Text style={styles.loadingText}>Cargando StreamPay...</Text>
+          </View>
+        )}
       />
 
-      {/* Floating Action Button - Se muestra temporalmente */}
-      {!isFullscreen && showFab && (
+      {showFab && !isFullscreen && (
         <TouchableOpacity
           style={styles.fab}
           onPress={() => {
             setShowMenu(!showMenu);
-            // Mantener visible mientras el menú está abierto
             if (hideTimeout.current) {
               clearTimeout(hideTimeout.current);
             }
@@ -386,42 +380,53 @@ export default function WebViewScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Overlay para cerrar el menú al tocar fuera */}
       {showMenu && !isFullscreen && (
-        <TouchableOpacity
-          style={styles.menuOverlay}
-          activeOpacity={1}
-          onPress={() => setShowMenu(false)}
-        />
-      )}
-
-      {/* Menú flotante */}
-      {showMenu && !isFullscreen && (
-        <View style={styles.menu}>
+        <>
           <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => {
-              setShowMenu(false);
-              webViewRef.current?.reload();
-            }}
-          >
-            <Ionicons name="refresh-outline" size={20} color="#e2e8f0" />
-            <Text style={styles.menuText}>Recargar</Text>
-          </TouchableOpacity>
+            style={styles.menuOverlay}
+            activeOpacity={1}
+            onPress={() => setShowMenu(false)}
+          />
           
-          <View style={styles.menuDivider} />
-          
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => {
-              setShowMenu(false);
-              router.push('/config');
-            }}
-          >
-            <Ionicons name="settings-outline" size={20} color="#e2e8f0" />
-            <Text style={styles.menuText}>Configuración</Text>
-          </TouchableOpacity>
-        </View>
+          <View style={styles.menu}>
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => {
+                setShowMenu(false);
+                webViewRef.current?.reload();
+              }}
+            >
+              <Ionicons name="refresh-outline" size={20} color="#e2e8f0" />
+              <Text style={styles.menuText}>Recargar</Text>
+            </TouchableOpacity>
+            
+            <View style={styles.menuDivider} />
+            
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => {
+                setShowMenu(false);
+                clearCache();
+              }}
+            >
+              <Ionicons name="trash-outline" size={20} color="#e2e8f0" />
+              <Text style={styles.menuText}>Limpiar Caché</Text>
+            </TouchableOpacity>
+            
+            <View style={styles.menuDivider} />
+            
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => {
+                setShowMenu(false);
+                router.push('/config');
+              }}
+            >
+              <Ionicons name="settings-outline" size={20} color="#e2e8f0" />
+              <Text style={styles.menuText}>Configuración</Text>
+            </TouchableOpacity>
+          </View>
+        </>
       )}
     </View>
   );
@@ -435,6 +440,16 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
     backgroundColor: '#0f172a',
+  },
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: '#0f172a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: {
+    color: '#6366f1',
+    fontSize: 16,
   },
   menuOverlay: {
     position: 'absolute',
