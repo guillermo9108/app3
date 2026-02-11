@@ -30,6 +30,7 @@ export default function WebViewScreen() {
   const [streamingPort, setStreamingPort] = useState('3001');
   const [canGoBack, setCanGoBack] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
 
   useEffect(() => {
     loadServerUrl();
