@@ -10,11 +10,11 @@ export default function RootLayout() {
 
   return (
     <Stack
-      screenOptions={
+      screenOptions={{
         headerShown: false,
         contentStyle: { backgroundColor: '#0f172a' },
         animation: 'fade',
-      }
+      }}
     >
       <Stack.Screen name="index" />
       <Stack.Screen name="config" />
