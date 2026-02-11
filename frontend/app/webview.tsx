@@ -319,6 +319,45 @@ export default function WebViewScreen() {
           return true;
         }}
       />
+
+      {/* Floating Action Button - Solo visible cuando NO está en fullscreen */}
+      {!isFullscreen && (
+        <TouchableOpacity
+          style={styles.fab}
+          onPress={() => setShowMenu(!showMenu)}
+        >
+          <Ionicons name="ellipsis-vertical" size={24} color="#ffffff" />
+        </TouchableOpacity>
+      )}
+
+      {/* Menú flotante */}
+      {showMenu && !isFullscreen && (
+        <View style={styles.menu}>
+          <TouchableOpacity
+            style={styles.menuItem}
+            onPress={() => {
+              setShowMenu(false);
+              webViewRef.current?.reload();
+            }}
+          >
+            <Ionicons name="refresh-outline" size={20} color="#e2e8f0" />
+            <Text style={styles.menuText}>Recargar</Text>
+          </TouchableOpacity>
+          
+          <View style={styles.menuDivider} />
+          
+          <TouchableOpacity
+            style={styles.menuItem}
+            onPress={() => {
+              setShowMenu(false);
+              router.push('/config');
+            }}
+          >
+            <Ionicons name="settings-outline" size={20} color="#e2e8f0" />
+            <Text style={styles.menuText}>Configuración</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
