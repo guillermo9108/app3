@@ -330,6 +330,15 @@ export default function WebViewScreen() {
         </TouchableOpacity>
       )}
 
+      {/* Overlay para cerrar el menú al tocar fuera */}
+      {showMenu && !isFullscreen && (
+        <TouchableOpacity
+          style={styles.menuOverlay}
+          activeOpacity={1}
+          onPress={() => setShowMenu(false)}
+        />
+      )}
+
       {/* Menú flotante */}
       {showMenu && !isFullscreen && (
         <View style={styles.menu}>
