@@ -1,35 +1,16 @@
-import { useEffect } from 'react';
-import { useRouter } from 'expo-router';
-import { View, ActivityIndicator, StyleSheet } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Text, View, StyleSheet, Image } from "react-native";
+
+const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
 export default function Index() {
-  const router = useRouter();
-
-  useEffect(() => {
-    checkServerConfig();
-  }, []);
-
-  const checkServerConfig = async () => {
-    try {
-      const serverUrl = await AsyncStorage.getItem('SERVER_URL');
-      
-      if (serverUrl) {
-        // Si ya hay una URL configurada, ir al WebView
-        router.replace('/webview');
-      } else {
-        // Si no hay URL, ir a la configuración
-        router.replace('/config');
-      }
-    } catch (error) {
-      console.error('Error checking server config:', error);
-      router.replace('/config');
-    }
-  };
+  console.log(EXPO_PUBLIC_BACKEND_URL, "EXPO_PUBLIC_BACKEND_URL");
 
   return (
     <View style={styles.container}>
-      <ActivityIndicator size="large" color="#6366f1" />
+      <Image
+        source={require("../assets/images/app-image.png")}
+        style={styles.image}
+      />
     </View>
   );
 }
@@ -37,8 +18,13 @@ export default function Index() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0f172a',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: "#0c0c0c",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  image: {
+    width: "100%",
+    height: "100%",
+    resizeMode: "contain",
   },
 });

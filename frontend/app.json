@@ -1,46 +1,22 @@
 {
   "expo": {
-    "name": "StreamPay",
-    "slug": "streampay3",
-    "version": "1.0.5",
+    "name": "frontend",
+    "slug": "frontend",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "streampay",
-    "userInterfaceStyle": "dark",
-    "backgroundColor": "#0f172a",
+    "scheme": "frontend",
+    "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/images/splash-image.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0f172a"
-    },
     "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.streampay.app",
-      "infoPlist": {
-        "NSCameraUsageDescription": "StreamPay necesita acceso a la cámara para subir fotos de productos en el marketplace",
-        "NSPhotoLibraryUsageDescription": "Accede a tus fotos para compartir en el marketplace",
-        "UIViewControllerBasedStatusBarAppearance": true
-      }
+      "supportsTablet": true
     },
     "android": {
-      "package": "com.streampay.app",
-      "versionCode": 5,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#0f172a"
+        "backgroundColor": "#000"
       },
-      "permissions": [
-        "INTERNET",
-        "ACCESS_NETWORK_STATE",
-        "CAMERA",
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
-      ],
-      "usesCleartextTraffic": true,
-      "edgeToEdgeEnabled": true,
-      "allowBackup": true,
-      "softwareKeyboardLayoutMode": "pan"
+      "edgeToEdgeEnabled": true
     },
     "web": {
       "bundler": "metro",
@@ -52,20 +28,15 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-image.png",
+          "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#0f172a"
+          "backgroundColor": "#000"
         }
       ]
     ],
     "experiments": {
       "typedRoutes": true
-    },
-    "extra": {
-      "eas": {
-        "projectId": "ff99e107-f144-4222-b3fa-d902c4f9f59f"
-      }
     }
   }
 }
