@@ -4,16 +4,18 @@ on:
   push:
     branches:
       - main
+      - app4
   pull_request:
     branches:
       - main
+      - app4
   workflow_dispatch:
 
 jobs:
   build:
     name: Build APK
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
@@ -32,7 +34,7 @@ jobs:
 
       - name: 📦 Install dependencies
         working-directory: ./frontend
-        run: yarn install --frozen-lockfile
+        run: yarn install
 
       - name: 🚀 Build APK
         working-directory: ./frontend
@@ -43,7 +45,4 @@ jobs:
       - name: 📝 Build info
         run: |
           echo "✅ Build started successfully!"
-          echo "📱 Check your build status at: https://expo.dev/accounts/[your-account]/projects/streampay/builds"
-          echo ""
-          echo "⚠️  Note: The build process continues on Expo's servers."
-          echo "You'll receive an email when it's complete."
+          echo "📱 Check status: https://expo.dev/accounts/guillermo9108/projects/streampay3/builds"
