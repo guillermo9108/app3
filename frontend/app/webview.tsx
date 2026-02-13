@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -6,10 +6,8 @@ import {
   Alert,
   TouchableOpacity,
   Text,
-  PanResponder,
   Animated,
   ScrollView,
-  Dimensions,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useRouter } from 'expo-router';
@@ -42,8 +40,6 @@ interface DownloadItem {
   downloadedAt?: Date;
 }
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
 export default function WebViewScreen() {
   const webViewRef = useRef<WebView>(null);
   const router = useRouter();
@@ -55,40 +51,44 @@ export default function WebViewScreen() {
   const [showDownloads, setShowDownloads] = useState(false);
   const [activeDownloads, setActiveDownloads] = useState<DownloadItem[]>([]);
   const [downloadHistory, setDownloadHistory] = useState<DownloadItem[]>([]);
-  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  
+  // Refs para evitar closures stale
+  const isVideoPlayingRef = useRef(false);
+  const hideTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const showMenuRef = useRef(false);
+  const showDownloadsRef = useRef(false);
   
   // Animación para el FAB
   const fabPosition = useRef(new Animated.Value(-60)).current;
   const swipeIndicatorOpacity = useRef(new Animated.Value(1)).current;
-  
-  // PanResponder para detectar swipe desde el borde izquierdo
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: (evt) => {
-        // Solo activar si el touch empieza cerca del borde izquierdo
-        return evt.nativeEvent.pageX < 30;
-      },
-      onMoveShouldSetPanResponder: (evt, gestureState) => {
-        return evt.nativeEvent.pageX < 50 && gestureState.dx > 10;
-      },
-      onPanResponderMove: (evt, gestureState) => {
-        if (gestureState.dx > 0 && gestureState.dx < 80) {
-          fabPosition.setValue(-60 + gestureState.dx);
-        }
-      },
-      onPanResponderRelease: (evt, gestureState) => {
-        if (gestureState.dx > 40) {
-          // Mostrar FAB
-          showFabButton();
-        } else {
-          // Ocultar FAB
-          hideFabButton();
-        }
-      },
-    })
-  ).current;
 
-  const showFabButton = () => {
+  // Mantener refs sincronizados
+  useEffect(() => {
+    showMenuRef.current = showMenu;
+  }, [showMenu]);
+
+  useEffect(() => {
+    showDownloadsRef.current = showDownloads;
+  }, [showDownloads]);
+
+  const clearHideTimeout = useCallback(() => {
+    if (hideTimeoutRef.current) {
+      clearTimeout(hideTimeoutRef.current);
+      hideTimeoutRef.current = null;
+    }
+  }, []);
+
+  const startHideTimeout = useCallback(() => {
+    clearHideTimeout();
+    hideTimeoutRef.current = setTimeout(() => {
+      // Solo ocultar si el menú y descargas están cerrados
+      if (!showMenuRef.current && !showDownloadsRef.current) {
+        hideFabButton();
+      }
+    }, 3000);
+  }, [clearHideTimeout]);
+
+  const showFabButton = useCallback(() => {
     setShowFab(true);
     Animated.spring(fabPosition, {
       toValue: 16,
@@ -101,9 +101,12 @@ export default function WebViewScreen() {
       duration: 200,
       useNativeDriver: true,
     }).start();
-  };
+    // Iniciar timeout para ocultar automáticamente
+    startHideTimeout();
+  }, [fabPosition, swipeIndicatorOpacity, startHideTimeout]);
 
-  const hideFabButton = () => {
+  const hideFabButton = useCallback(() => {
+    clearHideTimeout();
     Animated.spring(fabPosition, {
       toValue: -60,
       useNativeDriver: true,
@@ -118,13 +121,65 @@ export default function WebViewScreen() {
       duration: 300,
       useNativeDriver: true,
     }).start();
-  };
+  }, [fabPosition, swipeIndicatorOpacity, clearHideTimeout]);
+
+  const handleIndicatorPress = useCallback(() => {
+    showFabButton();
+  }, [showFabButton]);
+
+  // Función para poner video en fullscreen
+  const enterVideoFullscreen = useCallback(() => {
+    webViewRef.current?.injectJavaScript(`
+      (function() {
+        try {
+          const videos = document.querySelectorAll('video');
+          let playingVideo = null;
+          
+          // Buscar el video que está reproduciéndose
+          videos.forEach(video => {
+            if (!video.paused && !video.ended) {
+              playingVideo = video;
+            }
+          });
+          
+          // Si no hay video reproduciéndose, buscar el primer video visible
+          if (!playingVideo && videos.length > 0) {
+            playingVideo = videos[0];
+          }
+          
+          if (playingVideo && !document.fullscreenElement && !document.webkitFullscreenElement) {
+            if (playingVideo.requestFullscreen) {
+              playingVideo.requestFullscreen();
+            } else if (playingVideo.webkitRequestFullscreen) {
+              playingVideo.webkitRequestFullscreen();
+            } else if (playingVideo.webkitEnterFullscreen) {
+              playingVideo.webkitEnterFullscreen();
+            }
+          }
+        } catch(e) {
+          console.log('Fullscreen error:', e);
+        }
+      })();
+      true;
+    `);
+  }, []);
 
   useEffect(() => {
     loadServerUrl();
     loadDownloadHistory();
     setupNotifications();
-    setupOrientationListener();
+    
+    // Configurar listener de orientación
+    const subscription = ScreenOrientation.addOrientationChangeListener((event) => {
+      const orientation = event.orientationInfo.orientation;
+      
+      // Si hay un video reproduciéndose y se gira a horizontal
+      if (isVideoPlayingRef.current && 
+          (orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT || 
+           orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT)) {
+        enterVideoFullscreen();
+      }
+    });
     
     const backHandler = BackHandler.addEventListener(
       'hardwareBackPress',
@@ -133,44 +188,37 @@ export default function WebViewScreen() {
 
     return () => {
       backHandler.remove();
+      subscription.remove();
+      clearHideTimeout();
       ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT).catch(() => {});
     };
-  }, [canGoBack, isVideoPlaying]);
+  }, []);
 
-  const setupOrientationListener = async () => {
-    // Escuchar cambios de orientación
-    ScreenOrientation.addOrientationChangeListener((event) => {
-      const orientation = event.orientationInfo.orientation;
-      
-      // Si hay un video reproduciéndose y se gira a horizontal
-      if (isVideoPlaying && 
-          (orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT || 
-           orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT)) {
-        // Poner video en pantalla completa
-        enterVideoFullscreen();
-      }
-    });
-  };
-
-  const enterVideoFullscreen = () => {
-    webViewRef.current?.injectJavaScript(`
-      try {
-        const video = document.querySelector('video');
-        if (video && !document.fullscreenElement) {
-          if (video.requestFullscreen) {
-            video.requestFullscreen();
-          } else if (video.webkitRequestFullscreen) {
-            video.webkitRequestFullscreen();
-          } else if (video.webkitEnterFullscreen) {
-            video.webkitEnterFullscreen();
-          }
-        }
-      } catch(e) {
-        console.log('Fullscreen error:', e);
-      }
-      true;
-    `);
-  };
+  // Actualizar handleBackPress cuando cambien las dependencias
+  const handleBackPress = useCallback(() => {
+    if (showDownloadsRef.current) {
+      setShowDownloads(false);
+      return true;
+    }
+    if (showMenuRef.current) {
+      setShowMenu(false);
+      startHideTimeout(); // Reiniciar timeout al cerrar menú
+      return true;
+    }
+    if (showFab) {
+      hideFabButton();
+      return true;
+    }
+    if (isFullscreen) {
+      exitFullscreen();
+      return true;
+    }
+    if (canGoBack && webViewRef.current) {
+      webViewRef.current.goBack();
+      return true;
+    }
+    return false;
+  }, [showFab, isFullscreen, canGoBack, hideFabButton, startHideTimeout]);
 
   const setupNotifications = async () => {
     try {
@@ -213,30 +261,6 @@ export default function WebViewScreen() {
     }
   };
 
-  const handleBackPress = () => {
-    if (showDownloads) {
-      setShowDownloads(false);
-      return true;
-    }
-    if (showMenu) {
-      setShowMenu(false);
-      return true;
-    }
-    if (showFab) {
-      hideFabButton();
-      return true;
-    }
-    if (isFullscreen) {
-      exitFullscreen();
-      return true;
-    }
-    if (canGoBack && webViewRef.current) {
-      webViewRef.current.goBack();
-      return true;
-    }
-    return false;
-  };
-
   const exitFullscreen = () => {
     webViewRef.current?.injectJavaScript(`
       try {
@@ -268,7 +292,7 @@ export default function WebViewScreen() {
       }
       
       if (data.type === 'videoState') {
-        setIsVideoPlaying(data.isPlaying);
+        isVideoPlayingRef.current = data.isPlaying;
         // Si el video empieza a reproducirse, desbloquear orientación
         if (data.isPlaying) {
           await ScreenOrientation.unlockAsync();
@@ -308,9 +332,12 @@ export default function WebViewScreen() {
     let lastBytes = 0;
     let lastTime = Date.now();
     
+    // Limpiar el nombre del archivo
+    const cleanFilename = filename.split('?')[0].split('#')[0] || `video_${downloadId}.mp4`;
+    
     const newDownload: DownloadItem = {
       id: downloadId,
-      filename,
+      filename: cleanFilename,
       url,
       progress: 0,
       speed: '0 B/s',
@@ -318,20 +345,29 @@ export default function WebViewScreen() {
     };
 
     setActiveDownloads(prev => [...prev, newDownload]);
+    
+    // Mostrar el modal de descargas automáticamente
+    setShowDownloads(true);
 
     try {
       await Notifications.scheduleNotificationAsync({
         content: {
           title: '📥 Descargando',
-          body: filename,
+          body: cleanFilename,
         },
         trigger: null,
       });
 
+      const downloadPath = FileSystem.documentDirectory + cleanFilename;
+      
       const downloadResumable = FileSystem.createDownloadResumable(
         url,
-        FileSystem.documentDirectory + filename,
-        {},
+        downloadPath,
+        {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36',
+          },
+        },
         (downloadProgress) => {
           const progress =
             downloadProgress.totalBytesWritten /
@@ -339,7 +375,7 @@ export default function WebViewScreen() {
           
           // Calcular velocidad
           const currentTime = Date.now();
-          const timeDiff = (currentTime - lastTime) / 1000; // en segundos
+          const timeDiff = (currentTime - lastTime) / 1000;
           const bytesDiff = downloadProgress.totalBytesWritten - lastBytes;
           const speed = timeDiff > 0 ? bytesDiff / timeDiff : 0;
           
@@ -358,16 +394,6 @@ export default function WebViewScreen() {
                 : d
             )
           );
-
-          if (progress > 0 && progress < 1) {
-            Notifications.scheduleNotificationAsync({
-              content: {
-                title: '📥 Descargando',
-                body: `${filename} - ${Math.round(progress * 100)}%`,
-              },
-              trigger: null,
-            });
-          }
         }
       );
 
@@ -376,7 +402,7 @@ export default function WebViewScreen() {
       if (result) {
         const completedDownload: DownloadItem = {
           id: downloadId,
-          filename,
+          filename: cleanFilename,
           url,
           progress: 100,
           speed: '0 B/s',
@@ -385,7 +411,6 @@ export default function WebViewScreen() {
           downloadedAt: new Date(),
         };
 
-        // Remover de activas y agregar al historial
         setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
         setDownloadHistory(prev => {
           const newHistory = [completedDownload, ...prev];
@@ -396,22 +421,43 @@ export default function WebViewScreen() {
         await Notifications.scheduleNotificationAsync({
           content: {
             title: '✅ Descarga completa',
-            body: filename,
+            body: cleanFilename,
           },
           trigger: null,
         });
       }
     } catch (error) {
+      console.log('Download error:', error);
+      
       setActiveDownloads(prev => 
         prev.map(d => 
           d.id === downloadId ? { ...d, status: 'failed' } : d
         )
       );
 
+      // Mover a historial como fallido después de 2 segundos
+      setTimeout(() => {
+        setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
+        setDownloadHistory(prev => {
+          const failedDownload: DownloadItem = {
+            id: downloadId,
+            filename: cleanFilename,
+            url,
+            progress: 0,
+            speed: '0 B/s',
+            status: 'failed',
+            downloadedAt: new Date(),
+          };
+          const newHistory = [failedDownload, ...prev];
+          saveDownloadHistory(newHistory);
+          return newHistory;
+        });
+      }, 2000);
+
       await Notifications.scheduleNotificationAsync({
         content: {
           title: '❌ Error en descarga',
-          body: filename,
+          body: cleanFilename,
         },
         trigger: null,
       });
@@ -522,65 +568,64 @@ export default function WebViewScreen() {
               Alert.alert('Error', 'No se pudo limpiar el caché completamente');
             }
             setShowMenu(false);
+            startHideTimeout();
           },
         },
       ]
     );
   };
 
-  // JavaScript para detectar estado del video y orientación automática
+  // JavaScript mejorado para detectar videos y descargas
   const injectedJavaScript = `
     (function() {
+      if (window.__streamPayInjected) return;
+      window.__streamPayInjected = true;
+      
       try {
         // Detectar fullscreen
-        document.addEventListener('fullscreenchange', function() {
+        const handleFullscreenChange = () => {
+          const isFS = !!(document.fullscreenElement || document.webkitFullscreenElement);
           window.ReactNativeWebView.postMessage(JSON.stringify({
             type: 'fullscreenchange',
-            isFullscreen: !!document.fullscreenElement
+            isFullscreen: isFS
           }));
-        });
+        };
         
-        document.addEventListener('webkitfullscreenchange', function() {
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'fullscreenchange',
-            isFullscreen: !!document.webkitFullscreenElement
-          }));
-        });
+        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 
         // Monitorear todos los videos
         const setupVideoListeners = () => {
           const videos = document.querySelectorAll('video');
           videos.forEach(video => {
-            if (!video.hasAttribute('data-listener-added')) {
-              video.setAttribute('data-listener-added', 'true');
+            if (!video.hasAttribute('data-sp-listener')) {
+              video.setAttribute('data-sp-listener', 'true');
               
-              video.addEventListener('play', function() {
+              const notifyState = (isPlaying) => {
                 window.ReactNativeWebView.postMessage(JSON.stringify({
                   type: 'videoState',
-                  isPlaying: true
+                  isPlaying: isPlaying
                 }));
-              });
+              };
               
-              video.addEventListener('pause', function() {
-                window.ReactNativeWebView.postMessage(JSON.stringify({
-                  type: 'videoState',
-                  isPlaying: false
-                }));
-              });
+              video.addEventListener('play', () => notifyState(true));
+              video.addEventListener('playing', () => notifyState(true));
+              video.addEventListener('pause', () => notifyState(false));
+              video.addEventListener('ended', () => notifyState(false));
+              video.addEventListener('waiting', () => notifyState(true));
               
-              video.addEventListener('ended', function() {
-                window.ReactNativeWebView.postMessage(JSON.stringify({
-                  type: 'videoState',
-                  isPlaying: false
-                }));
-              });
+              // Verificar estado inicial
+              if (!video.paused && !video.ended) {
+                notifyState(true);
+              }
             }
           });
         };
 
-        // Ejecutar al cargar y observar cambios en el DOM
+        // Ejecutar al cargar
         setupVideoListeners();
         
+        // Observar cambios en el DOM para nuevos videos
         const observer = new MutationObserver(() => {
           setupVideoListeners();
         });
@@ -590,23 +635,81 @@ export default function WebViewScreen() {
           subtree: true 
         });
 
-        // Interceptar descargas
+        // Interceptar descargas - mejorado para detectar más tipos de enlaces
+        const interceptDownload = (url, filename) => {
+          if (!url) return;
+          
+          // Extraer nombre del archivo de la URL si no se proporciona
+          let finalFilename = filename;
+          if (!finalFilename || finalFilename === 'download') {
+            const urlPath = url.split('?')[0].split('#')[0];
+            const urlFilename = urlPath.split('/').pop();
+            if (urlFilename && urlFilename.includes('.')) {
+              finalFilename = urlFilename;
+            } else {
+              finalFilename = 'video_' + Date.now() + '.mp4';
+            }
+          }
+          
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'download',
+            url: url,
+            filename: finalFilename
+          }));
+        };
+
+        // Interceptar clicks en enlaces de descarga
         document.addEventListener('click', function(e) {
-          const link = e.target.closest('a[download], a[href*=".mp4"], a[href*=".mp3"], a[href*=".pdf"], a[href*=".zip"]');
-          if (link) {
+          const target = e.target;
+          
+          // Buscar el enlace más cercano
+          const link = target.closest('a[download], a[href*=".mp4"], a[href*=".mp3"], a[href*=".pdf"], a[href*=".zip"], a[href*=".mkv"], a[href*=".avi"], a[href*=".mov"]');
+          
+          if (link && link.href) {
             e.preventDefault();
-            const url = link.href;
-            const filename = link.download || url.split('/').pop() || 'download';
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-              type: 'download',
-              url: url,
-              filename: filename
-            }));
+            e.stopPropagation();
+            interceptDownload(link.href, link.download || '');
+            return false;
+          }
+          
+          // Buscar botones de descarga comunes
+          const downloadBtn = target.closest('[class*="download"], [id*="download"], [data-action="download"], button[class*="download"]');
+          if (downloadBtn) {
+            // Buscar video actual en la página
+            const video = document.querySelector('video');
+            if (video && video.src) {
+              e.preventDefault();
+              interceptDownload(video.src, '');
+              return false;
+            }
+            // Buscar source dentro del video
+            if (video) {
+              const source = video.querySelector('source');
+              if (source && source.src) {
+                e.preventDefault();
+                interceptDownload(source.src, '');
+                return false;
+              }
+            }
           }
         }, true);
 
+        // Interceptar también en elementos con onclick que contengan URLs de video
+        document.addEventListener('click', function(e) {
+          const target = e.target;
+          const onclick = target.getAttribute('onclick') || '';
+          
+          // Buscar URLs de video en el onclick
+          const videoUrlMatch = onclick.match(/(https?:\\/\\/[^'"\\s]+\\.(mp4|mkv|avi|mov|mp3)[^'"\\s]*)/i);
+          if (videoUrlMatch) {
+            e.preventDefault();
+            interceptDownload(videoUrlMatch[1], '');
+          }
+        }, true);
+
+        console.log('StreamPay injection loaded successfully');
       } catch(e) {
-        console.log('Injection error:', e);
+        console.log('StreamPay injection error:', e);
       }
     })();
     true;
@@ -617,7 +720,7 @@ export default function WebViewScreen() {
   }
 
   return (
-    <View style={styles.container} {...panResponder.panHandlers}>
+    <View style={styles.container}>
       <StatusBar style="light" hidden={isFullscreen} />
       
       <WebView
@@ -627,6 +730,7 @@ export default function WebViewScreen() {
         onNavigationStateChange={handleNavigationStateChange}
         onMessage={handleMessage}
         injectedJavaScript={injectedJavaScript}
+        injectedJavaScriptBeforeContentLoaded={injectedJavaScript}
         onError={(syntheticEvent) => {
           const { nativeEvent } = syntheticEvent;
           console.warn('WebView error: ', nativeEvent);
@@ -657,16 +761,17 @@ export default function WebViewScreen() {
         )}
       />
 
-      {/* Indicador de swipe en el borde izquierdo */}
+      {/* Indicador clickeable para mostrar FAB */}
       {!isFullscreen && !showFab && (
-        <Animated.View 
-          style={[
-            styles.swipeIndicator,
-            { opacity: swipeIndicatorOpacity }
-          ]}
+        <TouchableOpacity 
+          style={styles.swipeIndicator}
+          onPress={handleIndicatorPress}
+          activeOpacity={0.7}
         >
-          <Ionicons name="chevron-forward" size={20} color="#6366f1" />
-        </Animated.View>
+          <Animated.View style={{ opacity: swipeIndicatorOpacity }}>
+            <Ionicons name="chevron-forward" size={20} color="#6366f1" />
+          </Animated.View>
+        </TouchableOpacity>
       )}
 
       {/* FAB flotante en la esquina superior izquierda */}
@@ -679,7 +784,15 @@ export default function WebViewScreen() {
         >
           <TouchableOpacity
             style={styles.fab}
-            onPress={() => setShowMenu(!showMenu)}
+            onPress={() => {
+              const newShowMenu = !showMenu;
+              setShowMenu(newShowMenu);
+              if (newShowMenu) {
+                clearHideTimeout(); // Detener auto-ocultar cuando el menú está abierto
+              } else {
+                startHideTimeout(); // Reiniciar cuando se cierra
+              }
+            }}
             onLongPress={hideFabButton}
           >
             <Ionicons 
@@ -697,7 +810,10 @@ export default function WebViewScreen() {
           <TouchableOpacity
             style={styles.menuOverlay}
             activeOpacity={1}
-            onPress={() => setShowMenu(false)}
+            onPress={() => {
+              setShowMenu(false);
+              startHideTimeout();
+            }}
           />
           
           <Animated.View 
@@ -711,6 +827,7 @@ export default function WebViewScreen() {
               onPress={() => {
                 setShowMenu(false);
                 webViewRef.current?.reload();
+                startHideTimeout();
               }}
             >
               <Ionicons name="refresh-outline" size={20} color="#e2e8f0" />
@@ -724,6 +841,7 @@ export default function WebViewScreen() {
               onPress={() => {
                 setShowMenu(false);
                 setShowDownloads(true);
+                clearHideTimeout(); // No ocultar mientras está en descargas
               }}
             >
               <View style={styles.menuItemWithBadge}>
@@ -756,6 +874,7 @@ export default function WebViewScreen() {
               style={styles.menuItem}
               onPress={() => {
                 setShowMenu(false);
+                startHideTimeout();
                 router.push('/config');
               }}
             >
@@ -781,7 +900,10 @@ export default function WebViewScreen() {
         <View style={styles.downloadsModal}>
           <View style={styles.downloadsHeader}>
             <Text style={styles.downloadsTitle}>Descargas</Text>
-            <TouchableOpacity onPress={() => setShowDownloads(false)}>
+            <TouchableOpacity onPress={() => {
+              setShowDownloads(false);
+              startHideTimeout(); // Reiniciar timeout al cerrar
+            }}>
               <Ionicons name="close" size={24} color="#e2e8f0" />
             </TouchableOpacity>
           </View>
@@ -791,7 +913,7 @@ export default function WebViewScreen() {
             {activeDownloads.length > 0 && (
               <View style={styles.downloadSection}>
                 <Text style={styles.sectionTitle}>
-                  <Ionicons name="cloud-download-outline" size={16} color="#6366f1" /> Descargas Activas
+                  Descargas Activas
                 </Text>
                 {activeDownloads.map((item) => (
                   <View key={item.id} style={styles.downloadItem}>
@@ -804,12 +926,13 @@ export default function WebViewScreen() {
                           {item.progress.toFixed(1)}%
                         </Text>
                         <Text style={styles.downloadSpeed}>{item.speed}</Text>
+                        {item.size && <Text style={styles.downloadSize}>{item.size}</Text>}
                       </View>
                       <View style={styles.progressBarContainer}>
                         <View 
                           style={[
                             styles.progressBar, 
-                            { width: `${item.progress}%` }
+                            { width: `${Math.min(item.progress, 100)}%` }
                           ]} 
                         />
                       </View>
@@ -823,7 +946,7 @@ export default function WebViewScreen() {
             <View style={styles.downloadSection}>
               <View style={styles.sectionHeader}>
                 <Text style={styles.sectionTitle}>
-                  <Ionicons name="time-outline" size={16} color="#6366f1" /> Historial
+                  Historial
                 </Text>
                 {downloadHistory.length > 0 && (
                   <TouchableOpacity onPress={clearAllDownloads}>
@@ -832,9 +955,9 @@ export default function WebViewScreen() {
                 )}
               </View>
               
-              {downloadHistory.length === 0 ? (
-                <Text style={styles.emptyText}>No hay descargas en el historial</Text>
-              ) : (
+              {downloadHistory.length === 0 && activeDownloads.length === 0 ? (
+                <Text style={styles.emptyText}>No hay descargas</Text>
+              ) : downloadHistory.length === 0 ? null : (
                 downloadHistory.map((item) => (
                   <View key={item.id} style={styles.downloadItem}>
                     <View style={styles.downloadInfo}>
@@ -896,18 +1019,20 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 60,
     left: 0,
-    width: 24,
-    height: 40,
-    backgroundColor: 'rgba(30, 41, 59, 0.8)',
-    borderTopRightRadius: 8,
-    borderBottomRightRadius: 8,
+    width: 28,
+    height: 44,
+    backgroundColor: 'rgba(30, 41, 59, 0.9)',
+    borderTopRightRadius: 10,
+    borderBottomRightRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
+    zIndex: 100,
   },
   fabContainer: {
     position: 'absolute',
     top: 50,
     left: 0,
+    zIndex: 101,
   },
   fab: {
     width: 48,
@@ -929,6 +1054,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.3)',
+    zIndex: 102,
   },
   menu: {
     position: 'absolute',
@@ -945,6 +1071,7 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     borderWidth: 1,
     borderColor: '#334155',
+    zIndex: 103,
   },
   menuItem: {
     flexDirection: 'row',
@@ -981,7 +1108,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: 'bold',
   },
-  // Estilos del modal de descargas
   downloadsModal: {
     position: 'absolute',
     top: 0,
@@ -989,6 +1115,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     backgroundColor: '#0f172a',
+    zIndex: 200,
   },
   downloadsHeader: {
     flexDirection: 'row',
@@ -1057,6 +1184,10 @@ const styles = StyleSheet.create({
   },
   downloadSpeed: {
     color: '#94a3b8',
+    fontSize: 12,
+  },
+  downloadSize: {
+    color: '#64748b',
     fontSize: 12,
   },
   downloadDate: {
