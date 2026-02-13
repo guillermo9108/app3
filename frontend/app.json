@@ -2,8 +2,8 @@
   "expo": {
     "name": "streampay3",
     "slug": "streampay3",
-    "version": "1.0.0",
-    "orientation": "portrait",
+    "version": "3.1.0",
+    "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "frontend",
     "userInterfaceStyle": "automatic",
@@ -26,6 +26,7 @@
     },
     "plugins": [
       "expo-router",
+      "expo-screen-orientation",
       [
         "expo-splash-screen",
         {
