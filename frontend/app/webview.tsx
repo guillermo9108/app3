@@ -51,18 +51,15 @@ export default function WebViewScreen() {
   const [showDownloads, setShowDownloads] = useState(false);
   const [activeDownloads, setActiveDownloads] = useState<DownloadItem[]>([]);
   const [downloadHistory, setDownloadHistory] = useState<DownloadItem[]>([]);
-  
-  // Refs para evitar closures stale
+
   const isVideoPlayingRef = useRef(false);
   const hideTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const showMenuRef = useRef(false);
   const showDownloadsRef = useRef(false);
-  
-  // Animación para el FAB
+
   const fabPosition = useRef(new Animated.Value(-60)).current;
   const swipeIndicatorOpacity = useRef(new Animated.Value(1)).current;
 
-  // Mantener refs sincronizados
   useEffect(() => {
     showMenuRef.current = showMenu;
   }, [showMenu]);
@@ -81,7 +78,6 @@ export default function WebViewScreen() {
   const startHideTimeout = useCallback(() => {
     clearHideTimeout();
     hideTimeoutRef.current = setTimeout(() => {
-      // Solo ocultar si el menú y descargas están cerrados
       if (!showMenuRef.current && !showDownloadsRef.current) {
         hideFabButton();
       }
@@ -101,7 +97,6 @@ export default function WebViewScreen() {
       duration: 200,
       useNativeDriver: true,
     }).start();
-    // Iniciar timeout para ocultar automáticamente
     startHideTimeout();
   }, [fabPosition, swipeIndicatorOpacity, startHideTimeout]);
 
@@ -127,38 +122,21 @@ export default function WebViewScreen() {
     showFabButton();
   }, [showFabButton]);
 
-  // Función para poner video en fullscreen
   const enterVideoFullscreen = useCallback(() => {
     webViewRef.current?.injectJavaScript(`
       (function() {
         try {
           const videos = document.querySelectorAll('video');
           let playingVideo = null;
-          
-          // Buscar el video que está reproduciéndose
           videos.forEach(video => {
-            if (!video.paused && !video.ended) {
-              playingVideo = video;
-            }
+            if (!video.paused && !video.ended) playingVideo = video;
           });
-          
-          // Si no hay video reproduciéndose, buscar el primer video visible
-          if (!playingVideo && videos.length > 0) {
-            playingVideo = videos[0];
-          }
-          
+          if (!playingVideo && videos.length > 0) playingVideo = videos[0];
           if (playingVideo && !document.fullscreenElement && !document.webkitFullscreenElement) {
-            if (playingVideo.requestFullscreen) {
-              playingVideo.requestFullscreen();
-            } else if (playingVideo.webkitRequestFullscreen) {
-              playingVideo.webkitRequestFullscreen();
-            } else if (playingVideo.webkitEnterFullscreen) {
-              playingVideo.webkitEnterFullscreen();
-            }
+            if (playingVideo.requestFullscreen) playingVideo.requestFullscreen();
+            else if (playingVideo.webkitEnterFullscreen) playingVideo.webkitEnterFullscreen();
           }
-        } catch(e) {
-          console.log('Fullscreen error:', e);
-        }
+        } catch(e) {}
       })();
       true;
     `);
@@ -168,23 +146,17 @@ export default function WebViewScreen() {
     loadServerUrl();
     loadDownloadHistory();
     setupNotifications();
-    
-    // Configurar listener de orientación
+
     const subscription = ScreenOrientation.addOrientationChangeListener((event) => {
       const orientation = event.orientationInfo.orientation;
-      
-      // Si hay un video reproduciéndose y se gira a horizontal
       if (isVideoPlayingRef.current && 
           (orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT || 
            orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT)) {
         enterVideoFullscreen();
       }
     });
-    
-    const backHandler = BackHandler.addEventListener(
-      'hardwareBackPress',
-      handleBackPress
-    );
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', handleBackPress);
 
     return () => {
       backHandler.remove();
@@ -194,7 +166,6 @@ export default function WebViewScreen() {
     };
   }, []);
 
-  // Actualizar handleBackPress cuando cambien las dependencias
   const handleBackPress = useCallback(() => {
     if (showDownloadsRef.current) {
       setShowDownloads(false);
@@ -202,7 +173,7 @@ export default function WebViewScreen() {
     }
     if (showMenuRef.current) {
       setShowMenu(false);
-      startHideTimeout(); // Reiniciar timeout al cerrar menú
+      startHideTimeout();
       return true;
     }
     if (showFab) {
@@ -224,20 +195,16 @@ export default function WebViewScreen() {
     try {
       await Notifications.requestPermissionsAsync();
     } catch (error) {
-      console.log('Notifications permission error:', error);
+      console.log('Notifications error:', error);
     }
   };
 
   const loadServerUrl = async () => {
     try {
       const url = await AsyncStorage.getItem('SERVER_URL');
-      if (url) {
-        setServerUrl(url);
-      } else {
-        router.replace('/config');
-      }
+      if (url) setServerUrl(url);
+      else router.replace('/config');
     } catch (error) {
-      console.error('Error loading server URL:', error);
       router.replace('/config');
     }
   };
@@ -245,30 +212,21 @@ export default function WebViewScreen() {
   const loadDownloadHistory = async () => {
     try {
       const history = await AsyncStorage.getItem('DOWNLOAD_HISTORY');
-      if (history) {
-        setDownloadHistory(JSON.parse(history));
-      }
-    } catch (error) {
-      console.log('Error loading download history:', error);
-    }
+      if (history) setDownloadHistory(JSON.parse(history));
+    } catch (error) {}
   };
 
   const saveDownloadHistory = async (history: DownloadItem[]) => {
     try {
       await AsyncStorage.setItem('DOWNLOAD_HISTORY', JSON.stringify(history));
-    } catch (error) {
-      console.log('Error saving download history:', error);
-    }
+    } catch (error) {}
   };
 
   const exitFullscreen = () => {
     webViewRef.current?.injectJavaScript(`
       try {
-        if (document.fullscreenElement) {
-          document.exitFullscreen();
-        } else if (document.webkitFullscreenElement) {
-          document.webkitExitFullscreen();
-        }
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
       } catch(e) {}
       true;
     `);
@@ -281,38 +239,19 @@ export default function WebViewScreen() {
   const handleMessage = async (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      
       if (data.type === 'fullscreenchange') {
         setIsFullscreen(data.isFullscreen);
-        if (data.isFullscreen) {
-          await ScreenOrientation.unlockAsync();
-        } else {
-          await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
-        }
+        if (data.isFullscreen) await ScreenOrientation.unlockAsync();
+        else await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
       }
-      
       if (data.type === 'videoState') {
         isVideoPlayingRef.current = data.isPlaying;
-        // Si el video empieza a reproducirse, desbloquear orientación
-        if (data.isPlaying) {
-          await ScreenOrientation.unlockAsync();
-        }
+        if (data.isPlaying) await ScreenOrientation.unlockAsync();
       }
-      
       if (data.type === 'download') {
         handleDownload(data.url, data.filename);
       }
-      
-      if (data.type === 'audio') {
-        if (data.action === 'playing') {
-          showAudioNotification(data.title, data.artist);
-        } else if (data.action === 'paused') {
-          await Notifications.dismissAllNotificationsAsync();
-        }
-      }
-    } catch (error) {
-      // Ignorar errores de parsing
-    }
+    } catch (error) {}
   };
 
   const formatBytes = (bytes: number) => {
@@ -327,14 +266,18 @@ export default function WebViewScreen() {
     return formatBytes(bytesPerSecond) + '/s';
   };
 
+  // FUNCIÓN CORREGIDA
   const handleDownload = async (url: string, filename: string) => {
     const downloadId = Date.now().toString();
     let lastBytes = 0;
     let lastTime = Date.now();
-    
-    // Limpiar el nombre del archivo
-    const cleanFilename = filename.split('?')[0].split('#')[0] || `video_${downloadId}.mp4`;
-    
+
+    // Limpieza estricta del nombre del archivo para evitar errores de FS
+    const cleanFilename = filename
+      .split('?')[0]
+      .split('#')[0]
+      .replace(/[/\\?%*:|"<>\s]/g, '_') || `file_${downloadId}.mp4`;
+
     const newDownload: DownloadItem = {
       id: downloadId,
       filename: cleanFilename,
@@ -345,21 +288,16 @@ export default function WebViewScreen() {
     };
 
     setActiveDownloads(prev => [...prev, newDownload]);
-    
-    // Mostrar el modal de descargas automáticamente
     setShowDownloads(true);
 
     try {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: '📥 Descargando',
-          body: cleanFilename,
-        },
-        trigger: null,
-      });
-
-      const downloadPath = FileSystem.documentDirectory + cleanFilename;
+      // Asegurar que FileSystem.documentDirectory termina con barra o añadirla
+      const baseDir = FileSystem.documentDirectory?.endsWith('/') 
+        ? FileSystem.documentDirectory 
+        : `${FileSystem.documentDirectory}/`;
       
+      const downloadPath = `${baseDir}${cleanFilename}`;
+
       const downloadResumable = FileSystem.createDownloadResumable(
         url,
         downloadPath,
@@ -369,37 +307,27 @@ export default function WebViewScreen() {
           },
         },
         (downloadProgress) => {
-          const progress =
-            downloadProgress.totalBytesWritten /
-            downloadProgress.totalBytesExpectedToWrite;
-          
-          // Calcular velocidad
+          const progress = downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite;
           const currentTime = Date.now();
           const timeDiff = (currentTime - lastTime) / 1000;
           const bytesDiff = downloadProgress.totalBytesWritten - lastBytes;
           const speed = timeDiff > 0 ? bytesDiff / timeDiff : 0;
-          
+
           lastBytes = downloadProgress.totalBytesWritten;
           lastTime = currentTime;
 
           setActiveDownloads(prev => 
-            prev.map(d => 
-              d.id === downloadId 
-                ? { 
-                    ...d, 
-                    progress: progress * 100, 
-                    speed: formatSpeed(speed),
-                    size: formatBytes(downloadProgress.totalBytesExpectedToWrite)
-                  } 
-                : d
+            prev.map(d => d.id === downloadId 
+              ? { ...d, progress: progress * 100, speed: formatSpeed(speed), size: formatBytes(downloadProgress.totalBytesExpectedToWrite) } 
+              : d
             )
           );
         }
       );
 
       const result = await downloadResumable.downloadAsync();
-      
-      if (result) {
+
+      if (result && result.uri) {
         const completedDownload: DownloadItem = {
           id: downloadId,
           filename: cleanFilename,
@@ -419,48 +347,18 @@ export default function WebViewScreen() {
         });
 
         await Notifications.scheduleNotificationAsync({
-          content: {
-            title: '✅ Descarga completa',
-            body: cleanFilename,
-          },
+          content: { title: '✅ Descarga completa', body: cleanFilename },
           trigger: null,
         });
       }
-    } catch (error) {
-      console.log('Download error:', error);
+    } catch (error: any) {
+      console.error('Download Error:', error);
+      setActiveDownloads(prev => prev.map(d => d.id === downloadId ? { ...d, status: 'failed' } : d));
+      Alert.alert("Error", "No se pudo completar la descarga. Verifique su conexión.");
       
-      setActiveDownloads(prev => 
-        prev.map(d => 
-          d.id === downloadId ? { ...d, status: 'failed' } : d
-        )
-      );
-
-      // Mover a historial como fallido después de 2 segundos
       setTimeout(() => {
         setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-        setDownloadHistory(prev => {
-          const failedDownload: DownloadItem = {
-            id: downloadId,
-            filename: cleanFilename,
-            url,
-            progress: 0,
-            speed: '0 B/s',
-            status: 'failed',
-            downloadedAt: new Date(),
-          };
-          const newHistory = [failedDownload, ...prev];
-          saveDownloadHistory(newHistory);
-          return newHistory;
-        });
-      }, 2000);
-
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: '❌ Error en descarga',
-          body: cleanFilename,
-        },
-        trigger: null,
-      });
+      }, 3000);
     }
   };
 
@@ -468,11 +366,8 @@ export default function WebViewScreen() {
     if (item.filePath) {
       try {
         const canShare = await Sharing.isAvailableAsync();
-        if (canShare) {
-          await Sharing.shareAsync(item.filePath);
-        } else {
-          Alert.alert('Error', 'No se puede abrir el archivo');
-        }
+        if (canShare) await Sharing.shareAsync(item.filePath);
+        else Alert.alert('Error', 'No se puede abrir el archivo');
       } catch (error) {
         Alert.alert('Error', 'No se pudo abrir el archivo');
       }
@@ -480,249 +375,106 @@ export default function WebViewScreen() {
   };
 
   const deleteDownload = async (item: DownloadItem) => {
-    Alert.alert(
-      'Eliminar archivo',
-      `¿Deseas eliminar "${item.filename}"?`,
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Eliminar',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              if (item.filePath) {
-                await FileSystem.deleteAsync(item.filePath, { idempotent: true });
-              }
-              setDownloadHistory(prev => {
-                const newHistory = prev.filter(d => d.id !== item.id);
-                saveDownloadHistory(newHistory);
-                return newHistory;
-              });
-            } catch (error) {
-              Alert.alert('Error', 'No se pudo eliminar el archivo');
-            }
-          },
+    Alert.alert('Eliminar', `¿Deseas eliminar "${item.filename}"?`, [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Eliminar',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            if (item.filePath) await FileSystem.deleteAsync(item.filePath, { idempotent: true });
+            setDownloadHistory(prev => {
+              const newHistory = prev.filter(d => d.id !== item.id);
+              saveDownloadHistory(newHistory);
+              return newHistory;
+            });
+          } catch (error) {}
         },
-      ]
-    );
+      },
+    ]);
   };
 
   const clearAllDownloads = () => {
-    Alert.alert(
-      'Limpiar historial',
-      '¿Deseas eliminar todo el historial de descargas?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Eliminar todo',
-          style: 'destructive',
-          onPress: async () => {
-            for (const item of downloadHistory) {
-              if (item.filePath) {
-                try {
-                  await FileSystem.deleteAsync(item.filePath, { idempotent: true });
-                } catch (e) {}
-              }
-            }
-            setDownloadHistory([]);
-            saveDownloadHistory([]);
-          },
+    Alert.alert('Limpiar', '¿Eliminar todo el historial?', [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Eliminar todo',
+        style: 'destructive',
+        onPress: async () => {
+          for (const item of downloadHistory) {
+            if (item.filePath) try { await FileSystem.deleteAsync(item.filePath, { idempotent: true }); } catch (e) {}
+          }
+          setDownloadHistory([]);
+          saveDownloadHistory([]);
         },
-      ]
-    );
-  };
-
-  const showAudioNotification = async (title: string, artist: string) => {
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: '🎵 Reproduciendo',
-          body: `${title}${artist ? ` - ${artist}` : ''}`,
-          sound: false,
-          priority: Notifications.AndroidNotificationPriority.HIGH,
-          sticky: true,
-        },
-        trigger: null,
-      });
-    } catch (error) {
-      console.log('Audio notification error:', error);
-    }
+      },
+    ]);
   };
 
   const clearCache = async () => {
-    Alert.alert(
-      'Limpiar Caché',
-      '¿Deseas limpiar el caché de la aplicación?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Limpiar',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              webViewRef.current?.clearCache?.(true);
-              await Notifications.dismissAllNotificationsAsync();
-              Alert.alert('Éxito', 'Caché limpiado correctamente');
-              webViewRef.current?.reload();
-            } catch (error) {
-              Alert.alert('Error', 'No se pudo limpiar el caché completamente');
-            }
-            setShowMenu(false);
-            startHideTimeout();
-          },
+    Alert.alert('Caché', '¿Limpiar el caché?', [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Limpiar',
+        style: 'destructive',
+        onPress: async () => {
+          webViewRef.current?.clearCache?.(true);
+          await Notifications.dismissAllNotificationsAsync();
+          webViewRef.current?.reload();
+          setShowMenu(false);
+          startHideTimeout();
         },
-      ]
-    );
+      },
+    ]);
   };
 
-  // JavaScript mejorado para detectar videos y descargas
   const injectedJavaScript = `
     (function() {
       if (window.__streamPayInjected) return;
       window.__streamPayInjected = true;
-      
       try {
-        // Detectar fullscreen
         const handleFullscreenChange = () => {
           const isFS = !!(document.fullscreenElement || document.webkitFullscreenElement);
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'fullscreenchange',
-            isFullscreen: isFS
-          }));
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'fullscreenchange', isFullscreen: isFS }));
         };
-        
         document.addEventListener('fullscreenchange', handleFullscreenChange);
         document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 
-        // Monitorear todos los videos
         const setupVideoListeners = () => {
-          const videos = document.querySelectorAll('video');
-          videos.forEach(video => {
+          document.querySelectorAll('video').forEach(video => {
             if (!video.hasAttribute('data-sp-listener')) {
               video.setAttribute('data-sp-listener', 'true');
-              
-              const notifyState = (isPlaying) => {
-                window.ReactNativeWebView.postMessage(JSON.stringify({
-                  type: 'videoState',
-                  isPlaying: isPlaying
-                }));
-              };
-              
-              video.addEventListener('play', () => notifyState(true));
-              video.addEventListener('playing', () => notifyState(true));
-              video.addEventListener('pause', () => notifyState(false));
-              video.addEventListener('ended', () => notifyState(false));
-              video.addEventListener('waiting', () => notifyState(true));
-              
-              // Verificar estado inicial
-              if (!video.paused && !video.ended) {
-                notifyState(true);
-              }
+              const notify = (s) => window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'videoState', isPlaying: s }));
+              video.addEventListener('play', () => notify(true));
+              video.addEventListener('pause', () => notify(false));
+              if (!video.paused) notify(true);
             }
           });
         };
-
-        // Ejecutar al cargar
         setupVideoListeners();
-        
-        // Observar cambios en el DOM para nuevos videos
-        const observer = new MutationObserver(() => {
-          setupVideoListeners();
-        });
-        
-        observer.observe(document.body, { 
-          childList: true, 
-          subtree: true 
-        });
+        new MutationObserver(setupVideoListeners).observe(document.body, { childList: true, subtree: true });
 
-        // Interceptar descargas - mejorado para detectar más tipos de enlaces
-        const interceptDownload = (url, filename) => {
-          if (!url) return;
-          
-          // Extraer nombre del archivo de la URL si no se proporciona
-          let finalFilename = filename;
-          if (!finalFilename || finalFilename === 'download') {
-            const urlPath = url.split('?')[0].split('#')[0];
-            const urlFilename = urlPath.split('/').pop();
-            if (urlFilename && urlFilename.includes('.')) {
-              finalFilename = urlFilename;
-            } else {
-              finalFilename = 'video_' + Date.now() + '.mp4';
-            }
-          }
-          
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'download',
-            url: url,
-            filename: finalFilename
-          }));
+        const intercept = (url, name) => {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'download', url, filename: name }));
         };
 
-        // Interceptar clicks en enlaces de descarga
         document.addEventListener('click', function(e) {
-          const target = e.target;
-          
-          // Buscar el enlace más cercano
-          const link = target.closest('a[download], a[href*=".mp4"], a[href*=".mp3"], a[href*=".pdf"], a[href*=".zip"], a[href*=".mkv"], a[href*=".avi"], a[href*=".mov"]');
-          
+          const link = e.target.closest('a[download], a[href*=".mp4"], a[href*=".mp3"], a[href*=".mkv"]');
           if (link && link.href) {
             e.preventDefault();
-            e.stopPropagation();
-            interceptDownload(link.href, link.download || '');
-            return false;
-          }
-          
-          // Buscar botones de descarga comunes
-          const downloadBtn = target.closest('[class*="download"], [id*="download"], [data-action="download"], button[class*="download"]');
-          if (downloadBtn) {
-            // Buscar video actual en la página
-            const video = document.querySelector('video');
-            if (video && video.src) {
-              e.preventDefault();
-              interceptDownload(video.src, '');
-              return false;
-            }
-            // Buscar source dentro del video
-            if (video) {
-              const source = video.querySelector('source');
-              if (source && source.src) {
-                e.preventDefault();
-                interceptDownload(source.src, '');
-                return false;
-              }
-            }
+            intercept(link.href, link.download || '');
           }
         }, true);
-
-        // Interceptar también en elementos con onclick que contengan URLs de video
-        document.addEventListener('click', function(e) {
-          const target = e.target;
-          const onclick = target.getAttribute('onclick') || '';
-          
-          // Buscar URLs de video en el onclick
-          const videoUrlMatch = onclick.match(/(https?:\\/\\/[^'"\\s]+\\.(mp4|mkv|avi|mov|mp3)[^'"\\s]*)/i);
-          if (videoUrlMatch) {
-            e.preventDefault();
-            interceptDownload(videoUrlMatch[1], '');
-          }
-        }, true);
-
-        console.log('StreamPay injection loaded successfully');
-      } catch(e) {
-        console.log('StreamPay injection error:', e);
-      }
+      } catch(e) {}
     })();
     true;
   `;
 
-  if (!serverUrl) {
-    return <View style={styles.container} />;
-  }
+  if (!serverUrl) return <View style={styles.container} />;
 
   return (
     <View style={styles.container}>
       <StatusBar style="light" hidden={isFullscreen} />
-      
       <WebView
         ref={webViewRef}
         source={{ uri: serverUrl }}
@@ -731,28 +483,11 @@ export default function WebViewScreen() {
         onMessage={handleMessage}
         injectedJavaScript={injectedJavaScript}
         injectedJavaScriptBeforeContentLoaded={injectedJavaScript}
-        onError={(syntheticEvent) => {
-          const { nativeEvent } = syntheticEvent;
-          console.warn('WebView error: ', nativeEvent);
-        }}
-        onHttpError={(syntheticEvent) => {
-          const { nativeEvent } = syntheticEvent;
-          console.warn('HTTP error: ', nativeEvent);
-        }}
         javaScriptEnabled={true}
         domStorageEnabled={true}
-        allowFileAccess={true}
-        mediaPlaybackRequiresUserAction={false}
         allowsFullscreenVideo={true}
         allowsInlineMediaPlayback={true}
-        mixedContentMode="always"
-        userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 StreamPayAPK/3.0"
-        cacheEnabled={true}
-        cacheMode="LOAD_CACHE_ELSE_NETWORK"
-        incognito={false}
-        androidLayerType="hardware"
-        androidHardwareAccelerationDisabled={false}
-        setSupportMultipleWindows={false}
+        userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
         startInLoadingState={true}
         renderLoading={() => (
           <View style={styles.loadingContainer}>
@@ -761,234 +496,87 @@ export default function WebViewScreen() {
         )}
       />
 
-      {/* Indicador clickeable para mostrar FAB */}
       {!isFullscreen && !showFab && (
-        <TouchableOpacity 
-          style={styles.swipeIndicator}
-          onPress={handleIndicatorPress}
-          activeOpacity={0.7}
-        >
+        <TouchableOpacity style={styles.swipeIndicator} onPress={handleIndicatorPress}>
           <Animated.View style={{ opacity: swipeIndicatorOpacity }}>
             <Ionicons name="chevron-forward" size={20} color="#6366f1" />
           </Animated.View>
         </TouchableOpacity>
       )}
 
-      {/* FAB flotante en la esquina superior izquierda */}
       {!isFullscreen && (
-        <Animated.View
-          style={[
-            styles.fabContainer,
-            { transform: [{ translateX: fabPosition }] }
-          ]}
-        >
-          <TouchableOpacity
-            style={styles.fab}
-            onPress={() => {
-              const newShowMenu = !showMenu;
-              setShowMenu(newShowMenu);
-              if (newShowMenu) {
-                clearHideTimeout(); // Detener auto-ocultar cuando el menú está abierto
-              } else {
-                startHideTimeout(); // Reiniciar cuando se cierra
-              }
-            }}
-            onLongPress={hideFabButton}
+        <Animated.View style={[styles.fabContainer, { transform: [{ translateX: fabPosition }] }]}>
+          <TouchableOpacity 
+            style={styles.fab} 
+            onPress={() => { setShowMenu(!showMenu); if(!showMenu) clearHideTimeout(); else startHideTimeout(); }}
           >
-            <Ionicons 
-              name={showMenu ? "close" : "menu"} 
-              size={24} 
-              color="#ffffff" 
-            />
+            <Ionicons name={showMenu ? "close" : "menu"} size={24} color="#ffffff" />
           </TouchableOpacity>
         </Animated.View>
       )}
 
-      {/* Menú desplegable */}
       {showMenu && !isFullscreen && (
         <>
-          <TouchableOpacity
-            style={styles.menuOverlay}
-            activeOpacity={1}
-            onPress={() => {
-              setShowMenu(false);
-              startHideTimeout();
-            }}
-          />
-          
-          <Animated.View 
-            style={[
-              styles.menu,
-              { transform: [{ translateX: fabPosition }] }
-            ]}
-          >
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                webViewRef.current?.reload();
-                startHideTimeout();
-              }}
-            >
+          <TouchableOpacity style={styles.menuOverlay} activeOpacity={1} onPress={() => { setShowMenu(false); startHideTimeout(); }} />
+          <Animated.View style={[styles.menu, { transform: [{ translateX: fabPosition }] }]}>
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); webViewRef.current?.reload(); }}>
               <Ionicons name="refresh-outline" size={20} color="#e2e8f0" />
               <Text style={styles.menuText}>Recargar</Text>
             </TouchableOpacity>
-            
-            <View style={styles.menuDivider} />
-            
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                setShowDownloads(true);
-                clearHideTimeout(); // No ocultar mientras está en descargas
-              }}
-            >
-              <View style={styles.menuItemWithBadge}>
-                <Ionicons name="download-outline" size={20} color="#e2e8f0" />
-                <Text style={styles.menuText}>Descargas</Text>
-                {activeDownloads.length > 0 && (
-                  <View style={styles.badge}>
-                    <Text style={styles.badgeText}>{activeDownloads.length}</Text>
-                  </View>
-                )}
-              </View>
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); setShowDownloads(true); }}>
+              <Ionicons name="download-outline" size={20} color="#e2e8f0" />
+              <Text style={styles.menuText}>Descargas</Text>
             </TouchableOpacity>
-            
-            <View style={styles.menuDivider} />
-            
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                clearCache();
-              }}
-            >
+            <TouchableOpacity style={styles.menuItem} onPress={clearCache}>
               <Ionicons name="trash-outline" size={20} color="#e2e8f0" />
               <Text style={styles.menuText}>Limpiar Caché</Text>
             </TouchableOpacity>
-            
-            <View style={styles.menuDivider} />
-            
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                startHideTimeout();
-                router.push('/config');
-              }}
-            >
+            <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/config')}>
               <Ionicons name="settings-outline" size={20} color="#e2e8f0" />
               <Text style={styles.menuText}>Configuración</Text>
-            </TouchableOpacity>
-
-            <View style={styles.menuDivider} />
-            
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={hideFabButton}
-            >
-              <Ionicons name="eye-off-outline" size={20} color="#94a3b8" />
-              <Text style={[styles.menuText, { color: '#94a3b8' }]}>Ocultar menú</Text>
             </TouchableOpacity>
           </Animated.View>
         </>
       )}
 
-      {/* Modal de Descargas */}
       {showDownloads && (
         <View style={styles.downloadsModal}>
           <View style={styles.downloadsHeader}>
             <Text style={styles.downloadsTitle}>Descargas</Text>
-            <TouchableOpacity onPress={() => {
-              setShowDownloads(false);
-              startHideTimeout(); // Reiniciar timeout al cerrar
-            }}>
+            <TouchableOpacity onPress={() => { setShowDownloads(false); startHideTimeout(); }}>
               <Ionicons name="close" size={24} color="#e2e8f0" />
             </TouchableOpacity>
           </View>
-
           <ScrollView style={styles.downloadsContent}>
-            {/* Descargas Activas */}
-            {activeDownloads.length > 0 && (
-              <View style={styles.downloadSection}>
-                <Text style={styles.sectionTitle}>
-                  Descargas Activas
-                </Text>
-                {activeDownloads.map((item) => (
-                  <View key={item.id} style={styles.downloadItem}>
-                    <View style={styles.downloadInfo}>
-                      <Text style={styles.downloadFilename} numberOfLines={1}>
-                        {item.filename}
-                      </Text>
-                      <View style={styles.downloadStats}>
-                        <Text style={styles.downloadProgress}>
-                          {item.progress.toFixed(1)}%
-                        </Text>
-                        <Text style={styles.downloadSpeed}>{item.speed}</Text>
-                        {item.size && <Text style={styles.downloadSize}>{item.size}</Text>}
-                      </View>
-                      <View style={styles.progressBarContainer}>
-                        <View 
-                          style={[
-                            styles.progressBar, 
-                            { width: `${Math.min(item.progress, 100)}%` }
-                          ]} 
-                        />
-                      </View>
-                    </View>
+            {activeDownloads.map((item) => (
+              <View key={item.id} style={styles.downloadItem}>
+                <View style={styles.downloadInfo}>
+                  <Text style={styles.downloadFilename} numberOfLines={1}>{item.filename}</Text>
+                  <View style={styles.progressBarContainer}>
+                    <View style={[styles.progressBar, { width: `${item.progress}%` }]} />
                   </View>
-                ))}
+                </View>
               </View>
-            )}
-
-            {/* Historial de Descargas */}
-            <View style={styles.downloadSection}>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>
-                  Historial
-                </Text>
-                {downloadHistory.length > 0 && (
-                  <TouchableOpacity onPress={clearAllDownloads}>
-                    <Text style={styles.clearAllText}>Limpiar todo</Text>
+            ))}
+            <Text style={styles.sectionTitle}>Historial</Text>
+            {downloadHistory.map((item) => (
+              <View key={item.id} style={styles.downloadItem}>
+                <View style={styles.downloadInfo}>
+                  <Text style={styles.downloadFilename} numberOfLines={1}>{item.filename}</Text>
+                  <Text style={styles.downloadDate}>{item.status === 'completed' ? '✅' : '❌'}</Text>
+                </View>
+                <View style={styles.downloadActions}>
+                  {item.status === 'completed' && (
+                    <TouchableOpacity onPress={() => openFile(item)} style={styles.actionButton}>
+                      <Ionicons name="open-outline" size={20} color="#6366f1" />
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity onPress={() => deleteDownload(item)} style={styles.actionButton}>
+                    <Ionicons name="trash-outline" size={20} color="#ef4444" />
                   </TouchableOpacity>
-                )}
+                </View>
               </View>
-              
-              {downloadHistory.length === 0 && activeDownloads.length === 0 ? (
-                <Text style={styles.emptyText}>No hay descargas</Text>
-              ) : downloadHistory.length === 0 ? null : (
-                downloadHistory.map((item) => (
-                  <View key={item.id} style={styles.downloadItem}>
-                    <View style={styles.downloadInfo}>
-                      <Text style={styles.downloadFilename} numberOfLines={1}>
-                        {item.filename}
-                      </Text>
-                      <Text style={styles.downloadDate}>
-                        {item.status === 'completed' ? '✅ Completado' : '❌ Fallido'}
-                        {item.size && ` • ${item.size}`}
-                      </Text>
-                    </View>
-                    <View style={styles.downloadActions}>
-                      {item.status === 'completed' && (
-                        <TouchableOpacity 
-                          style={styles.actionButton}
-                          onPress={() => openFile(item)}
-                        >
-                          <Ionicons name="open-outline" size={20} color="#6366f1" />
-                        </TouchableOpacity>
-                      )}
-                      <TouchableOpacity 
-                        style={styles.actionButton}
-                        onPress={() => deleteDownload(item)}
-                      >
-                        <Ionicons name="trash-outline" size={20} color="#ef4444" />
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ))
-              )}
-            </View>
+            ))}
           </ScrollView>
         </View>
       )}
@@ -997,230 +585,28 @@ export default function WebViewScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f172a',
-  },
-  webview: {
-    flex: 1,
-    backgroundColor: '#0f172a',
-  },
-  loadingContainer: {
-    flex: 1,
-    backgroundColor: '#0f172a',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loadingText: {
-    color: '#6366f1',
-    fontSize: 16,
-  },
-  swipeIndicator: {
-    position: 'absolute',
-    top: 60,
-    left: 0,
-    width: 28,
-    height: 44,
-    backgroundColor: 'rgba(30, 41, 59, 0.9)',
-    borderTopRightRadius: 10,
-    borderBottomRightRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 100,
-  },
-  fabContainer: {
-    position: 'absolute',
-    top: 50,
-    left: 0,
-    zIndex: 101,
-  },
-  fab: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#6366f1',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-  },
-  menuOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    zIndex: 102,
-  },
-  menu: {
-    position: 'absolute',
-    top: 105,
-    left: 0,
-    backgroundColor: '#1e293b',
-    borderRadius: 12,
-    paddingVertical: 8,
-    minWidth: 200,
-    elevation: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
-    borderWidth: 1,
-    borderColor: '#334155',
-    zIndex: 103,
-  },
-  menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-  },
-  menuItemWithBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  menuText: {
-    color: '#e2e8f0',
-    fontSize: 16,
-    marginLeft: 12,
-  },
-  menuDivider: {
-    height: 1,
-    backgroundColor: '#334155',
-    marginVertical: 4,
-  },
-  badge: {
-    backgroundColor: '#ef4444',
-    borderRadius: 10,
-    minWidth: 20,
-    height: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 'auto',
-  },
-  badgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  downloadsModal: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#0f172a',
-    zIndex: 200,
-  },
-  downloadsHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 16,
-    paddingTop: 50,
-    backgroundColor: '#1e293b',
-    borderBottomWidth: 1,
-    borderBottomColor: '#334155',
-  },
-  downloadsTitle: {
-    color: '#e2e8f0',
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
-  downloadsContent: {
-    flex: 1,
-    padding: 16,
-  },
-  downloadSection: {
-    marginBottom: 24,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  sectionTitle: {
-    color: '#e2e8f0',
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 12,
-  },
-  clearAllText: {
-    color: '#ef4444',
-    fontSize: 14,
-  },
-  downloadItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1e293b',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 8,
-  },
-  downloadInfo: {
-    flex: 1,
-  },
-  downloadFilename: {
-    color: '#e2e8f0',
-    fontSize: 14,
-    fontWeight: '500',
-    marginBottom: 4,
-  },
-  downloadStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 6,
-  },
-  downloadProgress: {
-    color: '#6366f1',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  downloadSpeed: {
-    color: '#94a3b8',
-    fontSize: 12,
-  },
-  downloadSize: {
-    color: '#64748b',
-    fontSize: 12,
-  },
-  downloadDate: {
-    color: '#94a3b8',
-    fontSize: 12,
-  },
-  progressBarContainer: {
-    height: 4,
-    backgroundColor: '#334155',
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  progressBar: {
-    height: '100%',
-    backgroundColor: '#6366f1',
-    borderRadius: 2,
-  },
-  downloadActions: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  actionButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#334155',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  emptyText: {
-    color: '#64748b',
-    fontSize: 14,
-    textAlign: 'center',
-    paddingVertical: 20,
-  },
+  container: { flex: 1, backgroundColor: '#0f172a' },
+  webview: { flex: 1, backgroundColor: '#0f172a' },
+  loadingContainer: { ...StyleSheet.absoluteFillObject, backgroundColor: '#0f172a', alignItems: 'center', justifyContent: 'center' },
+  loadingText: { color: '#6366f1', fontSize: 16 },
+  swipeIndicator: { position: 'absolute', top: 60, left: 0, width: 28, height: 44, backgroundColor: 'rgba(30, 41, 59, 0.9)', borderTopRightRadius: 10, borderBottomRightRadius: 10, justifyContent: 'center', alignItems: 'center', zIndex: 100 },
+  fabContainer: { position: 'absolute', top: 50, left: 0, zIndex: 101 },
+  fab: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#6366f1', justifyContent: 'center', alignItems: 'center', elevation: 8 },
+  menuOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 102 },
+  menu: { position: 'absolute', top: 105, left: 0, backgroundColor: '#1e293b', borderRadius: 12, paddingVertical: 8, minWidth: 200, zIndex: 103, borderWidth: 1, borderColor: '#334155' },
+  menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 16 },
+  menuText: { color: '#e2e8f0', fontSize: 16, marginLeft: 12 },
+  downloadsModal: { ...StyleSheet.absoluteFillObject, backgroundColor: '#0f172a', zIndex: 200 },
+  downloadsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16, paddingTop: 50, backgroundColor: '#1e293b' },
+  downloadsTitle: { color: '#e2e8f0', fontSize: 20, fontWeight: 'bold' },
+  downloadsContent: { flex: 1, padding: 16 },
+  downloadItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e293b', borderRadius: 12, padding: 12, marginBottom: 8 },
+  downloadInfo: { flex: 1 },
+  downloadFilename: { color: '#e2e8f0', fontSize: 14, marginBottom: 4 },
+  progressBarContainer: { height: 4, backgroundColor: '#334155', borderRadius: 2, overflow: 'hidden' },
+  progressBar: { height: '100%', backgroundColor: '#6366f1' },
+  downloadActions: { flexDirection: 'row', gap: 8 },
+  actionButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#334155', justifyContent: 'center', alignItems: 'center' },
+  sectionTitle: { color: '#e2e8f0', fontSize: 16, fontWeight: '600', marginVertical: 12 },
+  downloadDate: { color: '#94a3b8', fontSize: 12 },
 });
