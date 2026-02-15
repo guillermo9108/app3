@@ -1,6 +1,9 @@
 name: Fix Yarn Lock
 on: workflow_dispatch
 
+permissions:
+  contents: write
+
 jobs:
   fix:
     runs-on: ubuntu-latest
@@ -14,7 +17,6 @@ jobs:
       - name: Update Lockfile
         working-directory: frontend
         run: |
-          rm -f yarn.lock
           yarn install
           
       - name: Commit and Push
@@ -22,5 +24,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add frontend/yarn.lock
-          git commit -m "fix: regenerate yarn.lock" || echo "No changes to commit"
+          git commit -m "fix: regenerate yarn.lock" || exit 0
           git push
