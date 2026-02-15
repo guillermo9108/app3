@@ -18,6 +18,7 @@ import * as Notifications from 'expo-notifications';
 import * as FileSystem from 'expo-file-system';
 import { Ionicons } from '@expo/vector-icons';
 import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library'; // <--- AGREGADO
 
 // Configurar notificaciones
 Notifications.setNotificationHandler({
@@ -52,17 +53,14 @@ export default function WebViewScreen() {
   const [activeDownloads, setActiveDownloads] = useState<DownloadItem[]>([]);
   const [downloadHistory, setDownloadHistory] = useState<DownloadItem[]>([]);
 
-  // Refs para evitar closures stale
   const isVideoPlayingRef = useRef(false);
   const hideTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const showMenuRef = useRef(false);
   const showDownloadsRef = useRef(false);
 
-  // Animación para el FAB
   const fabPosition = useRef(new Animated.Value(-60)).current;
   const swipeIndicatorOpacity = useRef(new Animated.Value(1)).current;
 
-  // Mantener refs sincronizados
   useEffect(() => {
     showMenuRef.current = showMenu;
   }, [showMenu]);
@@ -274,13 +272,12 @@ export default function WebViewScreen() {
     return formatBytes(bytesPerSecond) + '/s';
   };
 
-  // Lógica de descarga corregida quirúrgicamente
+  // Lógica de descarga CORREGIDA con MediaLibrary
   const handleDownload = async (url: string, filename: string) => {
     const downloadId = Date.now().toString();
     let lastBytes = 0;
     let lastTime = Date.now();
 
-    // Limpieza de caracteres prohibidos en Android FS
     const cleanFilename = filename
       .split('?')[0]
       .split('#')[0]
@@ -304,11 +301,10 @@ export default function WebViewScreen() {
         trigger: null,
       });
 
-      // Asegurar separador de ruta
       const baseDir = FileSystem.documentDirectory?.endsWith('/') 
         ? FileSystem.documentDirectory 
         : `${FileSystem.documentDirectory}/`;
-      
+
       const downloadPath = `${baseDir}${cleanFilename}`;
 
       const downloadResumable = FileSystem.createDownloadResumable(
@@ -347,6 +343,21 @@ export default function WebViewScreen() {
       const result = await downloadResumable.downloadAsync();
 
       if (result) {
+        // --- INICIO CAMBIO PARA GUARDADO PÚBLICO ---
+        try {
+          const { status } = await MediaLibrary.requestPermissionsAsync();
+          if (status === 'granted') {
+            const asset = await MediaLibrary.createAssetAsync(result.uri);
+            // Esto crea la carpeta "StreamPay" dentro de la carpeta pública de Medios/Downloads
+            await MediaLibrary.createAlbumAsync('StreamPay', asset, false);
+          } else {
+            Alert.alert("Permiso denegado", "El archivo se guardó solo en la caché de la app.");
+          }
+        } catch (err) {
+          console.log("Error al mover archivo a carpeta pública:", err);
+        }
+        // --- FIN CAMBIO ---
+
         const completedDownload: DownloadItem = {
           id: downloadId,
           filename: cleanFilename,
@@ -373,8 +384,8 @@ export default function WebViewScreen() {
     } catch (error) {
       console.error('Download error:', error);
       setActiveDownloads(prev => prev.map(d => d.id === downloadId ? { ...d, status: 'failed' } : d));
-      Alert.alert("Error", "No se pudo bajar el archivo. Revise permisos.");
-      
+      Alert.alert("Error", "No se pudo bajar el archivo.");
+
       setTimeout(() => {
         setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
         setDownloadHistory(prev => {
@@ -520,6 +531,8 @@ export default function WebViewScreen() {
         )}
       />
 
+      {/* ... Resto del render (SwipeIndicator, FAB, Menu, Modal) se mantiene IGUAL a tu código original ... */}
+      
       {!isFullscreen && !showFab && (
         <TouchableOpacity style={styles.swipeIndicator} onPress={handleIndicatorPress} activeOpacity={0.7}>
           <Animated.View style={{ opacity: swipeIndicatorOpacity }}>
