@@ -4,7 +4,7 @@
     "appVersionSource": "local"
   },
   "build": {
-    "preview": {
+    "production": {
       "android": {
         "buildType": "apk"
       }
