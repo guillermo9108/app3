@@ -21,8 +21,7 @@
       "permissions": [
         "WRITE_EXTERNAL_STORAGE",
         "READ_EXTERNAL_STORAGE",
-        "NOTIFICATIONS",
-        "INTERNET"
+        "NOTIFICATIONS"
       ]
     },
     "web": {
@@ -32,18 +31,7 @@
     },
     "plugins": [
       "expo-router",
-      "expo-screen-orientation",
-      "expo-notifications",
-      "expo-sharing",
-      [
-        "expo-splash-screen",
-        {
-          "image": "./assets/images/splash-image.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#000000"
-        }
-      ]
+      "expo-screen-orientation"
     ],
     "experiments": {
       "typedRoutes": true
