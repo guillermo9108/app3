@@ -140,12 +140,10 @@ export default function WebViewScreen() {
     loadDownloadHistory();
     const subscription = ScreenOrientation.addOrientationChangeListener((event) => {
       const orientation = event.orientationInfo.orientation;
-      const isLandscape = orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT || 
-                          orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
-      if (isVideoPlayingRef.current && isLandscape) {
+      if (isVideoPlayingRef.current && (orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT || orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT)) {
         setIsFullscreen(true);
         enterVideoFullscreen();
-      } else if (!isLandscape) {
+      } else if (orientation === ScreenOrientation.Orientation.PORTRAIT_UP) {
         setIsFullscreen(false);
       }
     });
@@ -188,26 +186,22 @@ export default function WebViewScreen() {
         isVideoPlayingRef.current = data.isPlaying;
         if (data.isPlaying) await ScreenOrientation.unlockAsync();
       }
-      if (data.type === 'download') {
-        handleDownload(data.url, data.filename);
-      }
+      if (data.type === 'download') handleDownload(data.url, data.filename);
     } catch (error) {}
   };
 
   const handleDownload = async (url: string, filename: string) => {
     const downloadId = Date.now().toString();
-    const cleanFilename = filename.split('?')[0].replace(/[/\\?%*:|"<>\s]/g, '_') || `file_${downloadId}.mp4`;
+    const cleanFilename = filename ? filename.replace(/[/\\?%*:|"<>\s]/g, '_') : `video_${downloadId}.mp4`;
     
     setActiveDownloads(prev => [...prev, { id: downloadId, filename: cleanFilename, url, progress: 0, speed: '0 B/s', status: 'downloading' }]);
     setShowDownloads(true);
 
     try {
       const downloadPath = `${FileSystem.documentDirectory}${cleanFilename}`;
-      const downloadResumable = FileSystem.createDownloadResumable(url, downloadPath, {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      }, (dp) => {
+      const downloadResumable = FileSystem.createDownloadResumable(url, downloadPath, {}, (dp) => {
         const progress = (dp.totalBytesWritten / dp.totalBytesExpectedToWrite) * 100;
-        setActiveDownloads(prev => prev.map(d => d.id === downloadId ? { ...d, progress } : d));
+        setActiveDownloads(prev => prev.map(d => d.id === downloadId ? { ...d, progress: isNaN(progress) ? 0 : progress } : d));
       });
 
       const result = await downloadResumable.downloadAsync();
@@ -224,19 +218,15 @@ export default function WebViewScreen() {
       }
     } catch (error) {
       setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-      Alert.alert("Error", "No se pudo descargar el archivo.");
+      Alert.alert("Error", "No se pudo conectar con el servidor local.");
     }
   };
 
   const openFile = async (item: DownloadItem) => { if (item.filePath) await Sharing.shareAsync(item.filePath); };
-  
   const deleteDownload = async (item: DownloadItem) => {
-    if (item.filePath) {
-        try { await FileSystem.deleteAsync(item.filePath); } catch(e) {}
-    }
+    if (item.filePath) try { await FileSystem.deleteAsync(item.filePath); } catch(e) {}
     const newHistory = downloadHistory.filter(d => d.id !== item.id);
-    setDownloadHistory(newHistory); 
-    saveDownloadHistory(newHistory);
+    setDownloadHistory(newHistory); saveDownloadHistory(newHistory);
   };
 
   const injectedJavaScript = `
@@ -245,8 +235,21 @@ export default function WebViewScreen() {
       window.__streamPayInjected = true;
       const notify = (type, payload) => window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload }));
       
-      document.addEventListener('fullscreenchange', () => notify('fullscreenchange', { isFullscreen: !!document.fullscreenElement }));
-      document.addEventListener('webkitfullscreenchange', () => notify('fullscreenchange', { isFullscreen: !!document.webkitFullscreenElement }));
+      document.addEventListener('click', e => {
+        const a = e.target.closest('a');
+        if (a && a.href) {
+          const url = a.href;
+          // CAPTURA ESPECIAL: Si contiene "action=stream" o termina en extensiones de video
+          if (url.includes('action=stream') || url.match(/\\.(mp4|mkv|avi|mp3|mov)(\\?.*)?$/i) || a.hasAttribute('download')) {
+            e.preventDefault();
+            e.stopPropagation();
+            notify('download', { 
+              url: a.href, 
+              filename: a.getAttribute('download') || "Video_" + Date.now() + ".mp4"
+            });
+          }
+        }
+      }, true);
 
       const checkVideos = () => {
         document.querySelectorAll('video').forEach(v => {
@@ -259,21 +262,8 @@ export default function WebViewScreen() {
         });
       };
       setInterval(checkVideos, 2000);
-
-      document.addEventListener('click', e => {
-        const a = e.target.closest('a');
-        if (a && a.href) {
-            const url = a.href.toLowerCase();
-            const isVideo = url.match(/\\.(mp4|mkv|avi|mp3|mov|flv|webm)(\\?.*)?$/);
-            if (isVideo || a.hasAttribute('download')) {
-                e.preventDefault();
-                notify('download', { 
-                    url: a.href, 
-                    filename: a.download || a.href.split('/').pop().split('#')[0].split('?')[0] 
-                });
-            }
-        }
-      }, true);
+      document.addEventListener('fullscreenchange', () => notify('fullscreenchange', { isFullscreen: !!document.fullscreenElement }));
+      document.addEventListener('webkitfullscreenchange', () => notify('fullscreenchange', { isFullscreen: !!document.webkitFullscreenElement }));
     })();
     true;
   `;
@@ -283,7 +273,6 @@ export default function WebViewScreen() {
   return (
     <View style={styles.container}>
       <StatusBar style="light" hidden={isFullscreen} />
-
       <WebView
         ref={webViewRef}
         source={{ uri: serverUrl }}
@@ -295,6 +284,7 @@ export default function WebViewScreen() {
         domStorageEnabled={true}
         allowsFullscreenVideo={true}
         allowsInlineMediaPlayback={true}
+        mixedContentMode="always"
         userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
       />
 
@@ -302,37 +292,29 @@ export default function WebViewScreen() {
         <>
           {!showFab && (
             <TouchableOpacity style={styles.swipeIndicator} onPress={handleIndicatorPress}>
-              <Animated.View style={{ opacity: swipeIndicatorOpacity }}>
-                <Ionicons name="chevron-forward" size={20} color="#6366f1" />
-              </Animated.View>
+              <Animated.View style={{ opacity: swipeIndicatorOpacity }}><Ionicons name="chevron-forward" size={20} color="#6366f1" /></Animated.View>
             </TouchableOpacity>
           )}
-
           <Animated.View style={[styles.fabContainer, { transform: [{ translateX: fabPosition }] }]}>
             <TouchableOpacity style={styles.fab} onPress={() => setShowMenu(!showMenu)}>
               <Ionicons name={showMenu ? "close" : "menu"} size={24} color="#ffffff" />
             </TouchableOpacity>
           </Animated.View>
-
           {showMenu && (
             <>
               <TouchableOpacity style={styles.menuOverlay} onPress={() => setShowMenu(false)} />
               <Animated.View style={[styles.menu, { transform: [{ translateX: fabPosition }] }]}>
                 <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); webViewRef.current?.reload(); }}>
-                  <Ionicons name="refresh-outline" size={20} color="#e2e8f0" />
-                  <Text style={styles.menuText}>Recargar</Text>
+                  <Ionicons name="refresh-outline" size={20} color="#e2e8f0" /><Text style={styles.menuText}>Recargar</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); setShowDownloads(true); }}>
-                  <Ionicons name="download-outline" size={20} color="#e2e8f0" />
-                  <Text style={styles.menuText}>Descargas</Text>
+                  <Ionicons name="download-outline" size={20} color="#e2e8f0" /><Text style={styles.menuText}>Descargas</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.menuItem} onPress={() => { webViewRef.current?.clearCache?.(true); setShowMenu(false); }}>
-                  <Ionicons name="trash-outline" size={20} color="#e2e8f0" />
-                  <Text style={styles.menuText}>Limpiar Caché</Text>
+                  <Ionicons name="trash-outline" size={20} color="#e2e8f0" /><Text style={styles.menuText}>Limpiar Caché</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/config')}>
-                  <Ionicons name="settings-outline" size={20} color="#e2e8f0" />
-                  <Text style={styles.menuText}>Configuración</Text>
+                  <Ionicons name="settings-outline" size={20} color="#e2e8f0" /><Text style={styles.menuText}>Configuración</Text>
                 </TouchableOpacity>
               </Animated.View>
             </>
@@ -350,21 +332,16 @@ export default function WebViewScreen() {
             {activeDownloads.map(item => (
               <View key={item.id} style={styles.downloadItem}>
                 <Text style={styles.downloadFilename} numberOfLines={1}>{item.filename}</Text>
-                <View style={[styles.progressBar, { width: `${item.progress}%`, height: 4, marginTop: 10, borderRadius: 2 }]} />
-                <Text style={{color: '#6366f1', fontSize: 10, marginTop: 5}}>{Math.round(item.progress)}%</Text>
+                <View style={[styles.progressBar, { width: `${item.progress}%`, height: 4, marginTop: 10 }]} />
               </View>
             ))}
             <Text style={styles.sectionTitle}>Historial</Text>
-            {downloadHistory.length === 0 && <Text style={{color: '#64748b', textAlign: 'center', marginTop: 20}}>No hay descargas</Text>}
             {downloadHistory.map(item => (
               <View key={item.id} style={styles.downloadItem}>
-                <View style={{flex: 1}}>
-                    <Text style={styles.downloadFilename} numberOfLines={1}>{item.filename}</Text>
-                    <Text style={{color: '#64748b', fontSize: 10}}>{item.downloadedAt ? new Date(item.downloadedAt).toLocaleDateString() : ''}</Text>
-                </View>
+                <Text style={styles.downloadFilename} numberOfLines={1}>{item.filename}</Text>
                 <View style={styles.downloadActions}>
-                  <TouchableOpacity onPress={() => openFile(item)}><Ionicons name="open-outline" size={22} color="#6366f1" /></TouchableOpacity>
-                  <TouchableOpacity onPress={() => deleteDownload(item)}><Ionicons name="trash-outline" size={22} color="#ef4444" /></TouchableOpacity>
+                  <TouchableOpacity onPress={() => openFile(item)}><Ionicons name="open-outline" size={20} color="#6366f1" /></TouchableOpacity>
+                  <TouchableOpacity onPress={() => deleteDownload(item)}><Ionicons name="trash-outline" size={20} color="#ef4444" /></TouchableOpacity>
                 </View>
               </View>
             ))}
@@ -380,18 +357,18 @@ const styles = StyleSheet.create({
   webview: { flex: 1 },
   swipeIndicator: { position: 'absolute', top: 60, left: 0, width: 28, height: 44, backgroundColor: 'rgba(30, 41, 59, 0.9)', borderTopRightRadius: 10, borderBottomRightRadius: 10, justifyContent: 'center', alignItems: 'center', zIndex: 100 },
   fabContainer: { position: 'absolute', top: 50, left: 0, zIndex: 101 },
-  fab: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#6366f1', justifyContent: 'center', alignItems: 'center', elevation: 8 },
+  fab: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#6366f1', justifyContent: 'center', alignItems: 'center' },
   menuOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.3)', zIndex: 102 },
-  menu: { position: 'absolute', top: 105, left: 0, backgroundColor: '#1e293b', borderRadius: 12, paddingVertical: 8, minWidth: 200, zIndex: 103, borderWidth: 1, borderColor: '#334155' },
-  menuItem: { flexDirection: 'row', alignItems: 'center', padding: 12 },
+  menu: { position: 'absolute', top: 105, left: 0, backgroundColor: '#1e293b', borderRadius: 12, paddingVertical: 8, minWidth: 200, zIndex: 103 },
   menuText: { color: '#e2e8f0', fontSize: 16, marginLeft: 12 },
+  menuItem: { flexDirection: 'row', alignItems: 'center', padding: 12 },
   downloadsModal: { ...StyleSheet.absoluteFillObject, backgroundColor: '#0f172a', zIndex: 200 },
   downloadsHeader: { flexDirection: 'row', justifyContent: 'space-between', padding: 16, paddingTop: 50, backgroundColor: '#1e293b' },
   downloadsTitle: { color: '#e2e8f0', fontSize: 20, fontWeight: 'bold' },
   downloadsContent: { padding: 16 },
-  downloadItem: { backgroundColor: '#1e293b', borderRadius: 8, padding: 12, marginBottom: 8, flexDirection: 'column' },
-  downloadFilename: { color: '#e2e8f0', fontWeight: '500' },
+  downloadItem: { backgroundColor: '#1e293b', borderRadius: 8, padding: 12, marginBottom: 8 },
+  downloadFilename: { color: '#e2e8f0' },
   progressBar: { backgroundColor: '#6366f1' },
-  downloadActions: { flexDirection: 'row', gap: 20, alignItems: 'center', marginLeft: 10 },
-  sectionTitle: { color: '#e2e8f0', fontSize: 16, fontWeight: 'bold', marginVertical: 15, borderBottomWidth: 1, borderBottomColor: '#334155', pb: 5 },
+  downloadActions: { flexDirection: 'row', gap: 15, marginTop: 10 },
+  sectionTitle: { color: '#e2e8f0', fontSize: 16, fontWeight: 'bold', marginVertical: 10 },
 });
