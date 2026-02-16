@@ -8,8 +8,10 @@ import {
   Text,
   Animated,
   ScrollView,
+  Platform,
+  Linking,
 } from 'react-native';
-import { WebView } from 'react-native-webview';
+import { WebView, WebViewNavigation } from 'react-native-webview';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
@@ -19,6 +21,10 @@ import * as FileSystem from 'expo-file-system';
 import { Ionicons } from '@expo/vector-icons';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
+
+// Extensiones de archivo que deben descargarse
+const DOWNLOAD_EXTENSIONS = /\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|apk|exe|dmg|iso)$/i;
+const DOWNLOAD_CONTENT_TYPES = ['application/octet-stream', 'application/pdf', 'application/zip', 'video/', 'audio/'];
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -177,6 +183,8 @@ export default function WebViewScreen() {
   const handleMessage = async (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
+      console.log('[StreamPay] Mensaje recibido:', data.type, data);
+      
       if (data.type === 'fullscreenchange') {
         setIsFullscreen(data.isFullscreen);
         if (data.isFullscreen) await ScreenOrientation.unlockAsync();
@@ -186,40 +194,178 @@ export default function WebViewScreen() {
         isVideoPlayingRef.current = data.isPlaying;
         if (data.isPlaying) await ScreenOrientation.unlockAsync();
       }
-      if (data.type === 'download') handleDownload(data.url, data.filename);
-    } catch (error) {}
+      if (data.type === 'download') {
+        console.log('[StreamPay] Descarga solicitada desde PWA:', data.url, data.filename);
+        // La PWA ya incluye el token en la URL de streaming
+        handleDownload(data.url, data.filename || '');
+      }
+    } catch (error) {
+      console.error('[StreamPay] Error procesando mensaje:', error);
+    }
   };
 
-  const handleDownload = async (url: string, filename: string) => {
+  const handleDownload = async (url: string, filename: string, headers?: Record<string, string>) => {
     const downloadId = Date.now().toString();
-    const cleanFilename = filename ? filename.replace(/[/\\?%*:|"<>\s]/g, '_') : `video_${downloadId}.mp4`;
+    
+    // Extraer nombre del archivo de la URL si no se proporciona
+    let cleanFilename = filename;
+    if (!cleanFilename || cleanFilename === 'undefined') {
+      try {
+        const urlObj = new URL(url);
+        const pathParts = urlObj.pathname.split('/');
+        cleanFilename = pathParts[pathParts.length - 1] || `archivo_${downloadId}`;
+        // Decodificar el nombre del archivo
+        cleanFilename = decodeURIComponent(cleanFilename);
+      } catch {
+        cleanFilename = `archivo_${downloadId}`;
+      }
+    }
+    
+    // Limpiar caracteres no válidos
+    cleanFilename = cleanFilename.replace(/[/\\?%*:|"<>]/g, '_').trim();
+    
+    // Asegurar que tenga extensión
+    if (!cleanFilename.includes('.')) {
+      cleanFilename += '.mp4';
+    }
+    
+    console.log('[StreamPay] Iniciando descarga:', url, 'como:', cleanFilename);
     
     setActiveDownloads(prev => [...prev, { id: downloadId, filename: cleanFilename, url, progress: 0, speed: '0 B/s', status: 'downloading' }]);
     setShowDownloads(true);
 
     try {
       const downloadPath = `${FileSystem.documentDirectory}${cleanFilename}`;
-      const downloadResumable = FileSystem.createDownloadResumable(url, downloadPath, {}, (dp) => {
-        const progress = (dp.totalBytesWritten / dp.totalBytesExpectedToWrite) * 100;
-        setActiveDownloads(prev => prev.map(d => d.id === downloadId ? { ...d, progress: isNaN(progress) ? 0 : progress } : d));
-      });
+      
+      // Configurar headers para simular navegador real
+      const downloadHeaders: Record<string, string> = {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Encoding': 'identity',
+        ...headers,
+      };
+      
+      const downloadResumable = FileSystem.createDownloadResumable(
+        url, 
+        downloadPath, 
+        { headers: downloadHeaders },
+        (dp) => {
+          const progress = dp.totalBytesExpectedToWrite > 0 
+            ? (dp.totalBytesWritten / dp.totalBytesExpectedToWrite) * 100 
+            : 0;
+          const speed = formatBytes(dp.totalBytesWritten);
+          setActiveDownloads(prev => prev.map(d => 
+            d.id === downloadId 
+              ? { ...d, progress: isNaN(progress) ? 0 : Math.min(progress, 100), speed: `${speed}` } 
+              : d
+          ));
+        }
+      );
 
       const result = await downloadResumable.downloadAsync();
-      if (result) {
+      
+      if (result && result.uri) {
+        console.log('[StreamPay] Descarga completada:', result.uri);
+        
+        // Solicitar permisos y guardar en galería
         const { status } = await MediaLibrary.requestPermissionsAsync();
         if (status === 'granted') {
-          const asset = await MediaLibrary.createAssetAsync(result.uri);
-          await MediaLibrary.createAlbumAsync('StreamPay', asset, false);
+          try {
+            const asset = await MediaLibrary.createAssetAsync(result.uri);
+            await MediaLibrary.createAlbumAsync('StreamPay', asset, false);
+            console.log('[StreamPay] Guardado en galería');
+          } catch (mediaError) {
+            console.log('[StreamPay] Error al guardar en galería:', mediaError);
+          }
         }
-        const completed: DownloadItem = { id: downloadId, filename: cleanFilename, url, progress: 100, speed: '0 B/s', status: 'completed', filePath: result.uri, downloadedAt: new Date() };
+        
+        const fileInfo = await FileSystem.getInfoAsync(result.uri);
+        const completed: DownloadItem = { 
+          id: downloadId, 
+          filename: cleanFilename, 
+          url, 
+          progress: 100, 
+          speed: '0 B/s', 
+          status: 'completed', 
+          filePath: result.uri, 
+          size: fileInfo.exists ? formatBytes((fileInfo as any).size || 0) : undefined,
+          downloadedAt: new Date() 
+        };
+        
         setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-        setDownloadHistory(prev => { const h = [completed, ...prev]; saveDownloadHistory(h); return h; });
-        Notifications.scheduleNotificationAsync({ content: { title: '✅ Descarga completa', body: cleanFilename }, trigger: null });
+        setDownloadHistory(prev => { 
+          const h = [completed, ...prev.slice(0, 49)]; // Mantener máximo 50 descargas
+          saveDownloadHistory(h); 
+          return h; 
+        });
+        
+        await Notifications.scheduleNotificationAsync({ 
+          content: { title: '✅ Descarga completa', body: cleanFilename }, 
+          trigger: null 
+        });
+      } else {
+        throw new Error('No se recibió resultado de la descarga');
       }
-    } catch (error) {
-      setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-      Alert.alert("Error", "No se pudo conectar con el servidor local.");
+    } catch (error: any) {
+      console.error('[StreamPay] Error en descarga:', error);
+      setActiveDownloads(prev => prev.map(d => 
+        d.id === downloadId ? { ...d, status: 'failed' } : d
+      ));
+      
+      // Intentar abrir en navegador externo como fallback
+      Alert.alert(
+        "Error de descarga", 
+        "No se pudo descargar el archivo. ¿Deseas abrirlo en el navegador?",
+        [
+          { text: "Cancelar", style: "cancel", onPress: () => {
+            setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
+          }},
+          { text: "Abrir en navegador", onPress: async () => {
+            setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
+            try {
+              await Linking.openURL(url);
+            } catch (e) {
+              Alert.alert("Error", "No se pudo abrir el enlace");
+            }
+          }}
+        ]
+      );
     }
+  };
+  
+  // Función para formatear bytes
+  const formatBytes = (bytes: number): string => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+  
+  // Interceptar navegación para detectar descargas directas (como fallback)
+  const handleShouldStartLoadWithRequest = (request: WebViewNavigation): boolean => {
+    const { url } = request;
+    
+    // Solo interceptar archivos descargables directos, NO las URLs de action=stream
+    // porque la PWA ya maneja esas con postMessage
+    const isDirectFileDownload = DOWNLOAD_EXTENSIONS.test(url) && !url.includes('action=stream');
+    
+    if (isDirectFileDownload) {
+      console.log('[StreamPay] Interceptada descarga directa:', url);
+      let filename = '';
+      try {
+        const urlObj = new URL(url);
+        const pathParts = urlObj.pathname.split('/');
+        filename = pathParts[pathParts.length - 1] || '';
+      } catch {
+        filename = '';
+      }
+      
+      handleDownload(url, filename);
+      return false; // No navegar, manejar como descarga
+    }
+    
+    return true; // Permitir navegación normal (incluyendo action=stream que la PWA maneja)
   };
 
   const openFile = async (item: DownloadItem) => { if (item.filePath) await Sharing.shareAsync(item.filePath); };
@@ -233,24 +379,60 @@ export default function WebViewScreen() {
     (function() {
       if (window.__streamPayInjected) return;
       window.__streamPayInjected = true;
-      const notify = (type, payload) => window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload }));
       
+      const notify = (type, payload) => {
+        try {
+          console.log('[StreamPay PWA] Enviando:', type, payload);
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload }));
+        } catch(e) {
+          console.error('[StreamPay PWA] Error al enviar mensaje:', e);
+        }
+      };
+      
+      // El botón de descarga de la PWA ya usa ReactNativeWebView.postMessage
+      // Interceptamos por seguridad los clics en enlaces de descarga también
       document.addEventListener('click', e => {
         const a = e.target.closest('a');
         if (a && a.href) {
           const url = a.href;
-          // CAPTURA ESPECIAL: Si contiene "action=stream" o termina en extensiones de video
-          if (url.includes('action=stream') || url.match(/\\.(mp4|mkv|avi|mp3|mov)(\\?.*)?$/i) || a.hasAttribute('download')) {
+          const downloadAttr = a.getAttribute('download');
+          const href = a.getAttribute('href') || '';
+          
+          // Detectar enlaces de descarga (incluyendo action=stream de StreamPay)
+          const isDownload = 
+            downloadAttr !== null ||
+            url.includes('action=stream') || 
+            url.includes('download=') ||
+            url.includes('/download/') ||
+            href.includes('download') ||
+            /\\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|apk)(\\?.*)?$/i.test(url);
+            
+          if (isDownload) {
             e.preventDefault();
             e.stopPropagation();
-            notify('download', { 
-              url: a.href, 
-              filename: a.getAttribute('download') || "Video_" + Date.now() + ".mp4"
-            });
+            e.stopImmediatePropagation();
+            
+            // Obtener nombre del archivo
+            let filename = downloadAttr || '';
+            if (!filename) {
+              try {
+                const urlObj = new URL(url);
+                filename = urlObj.searchParams.get('filename') || urlObj.searchParams.get('name') || '';
+                if (!filename) {
+                  const pathParts = urlObj.pathname.split('/');
+                  filename = pathParts[pathParts.length - 1] || '';
+                }
+              } catch(e) {}
+            }
+            
+            console.log('[StreamPay PWA] Capturado enlace de descarga:', url, filename);
+            notify('download', { url: url, filename: filename });
+            return false;
           }
         }
       }, true);
 
+      // Monitor de videos para fullscreen y reproducción
       const checkVideos = () => {
         document.querySelectorAll('video').forEach(v => {
           if (!v.hasAttribute('data-sp')) {
@@ -262,8 +444,12 @@ export default function WebViewScreen() {
         });
       };
       setInterval(checkVideos, 2000);
+      
+      // Eventos de fullscreen
       document.addEventListener('fullscreenchange', () => notify('fullscreenchange', { isFullscreen: !!document.fullscreenElement }));
       document.addEventListener('webkitfullscreenchange', () => notify('fullscreenchange', { isFullscreen: !!document.webkitFullscreenElement }));
+      
+      console.log('[StreamPay PWA] Script inyectado correctamente v3.1.1');
     })();
     true;
   `;
@@ -285,6 +471,17 @@ export default function WebViewScreen() {
         allowsFullscreenVideo={true}
         allowsInlineMediaPlayback={true}
         mixedContentMode="always"
+        allowFileAccess={true}
+        allowFileAccessFromFileURLs={true}
+        allowUniversalAccessFromFileURLs={true}
+        cacheEnabled={true}
+        mediaPlaybackRequiresUserAction={false}
+        onShouldStartLoadWithRequest={handleShouldStartLoadWithRequest}
+        originWhitelist={['*']}
+        onFileDownload={({ nativeEvent }) => {
+          console.log('[StreamPay] onFileDownload:', nativeEvent);
+          handleDownload(nativeEvent.downloadUrl, '');
+        }}
         userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
       />
 
