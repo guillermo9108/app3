@@ -2,7 +2,7 @@
   "expo": {
     "name": "streampay3.1",
     "slug": "streampay2",
-    "version": "3.1.0",
+    "version": "3.1.1",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "frontend",
@@ -14,14 +14,22 @@
     "android": {
       "package": "com.streampay.app",
       "edgeToEdgeEnabled": true,
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"
       },
       "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
         "WRITE_EXTERNAL_STORAGE",
         "READ_EXTERNAL_STORAGE",
-        "NOTIFICATIONS"
+        "READ_MEDIA_VIDEO",
+        "READ_MEDIA_AUDIO",
+        "READ_MEDIA_IMAGES",
+        "NOTIFICATIONS",
+        "FOREGROUND_SERVICE",
+        "DOWNLOAD_WITHOUT_NOTIFICATION"
       ]
     },
     "web": {
@@ -36,7 +44,14 @@
         "expo-media-library",
         {
           "photosPermission": "Permitir que StreamPay guarde videos en tu galería.",
-          "savePhotosPermission": "Permitir que StreamPay guarde videos en tu galería."
+          "savePhotosPermission": "Permitir que StreamPay guarde videos en tu galería.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "sounds": []
         }
       ]
     ],
