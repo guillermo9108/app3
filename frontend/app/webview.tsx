@@ -208,7 +208,7 @@ export default function WebViewScreen() {
       // Extraer nombre del parámetro 'filename' si existe (para tu API)
       const paramName = urlObj.searchParams.get('filename');
       if (paramName) cleanFilename = paramName;
-      
+
       if (!cleanFilename || cleanFilename === 'undefined') {
         const pathParts = urlObj.pathname.split('/');
         cleanFilename = pathParts[pathParts.length - 1] || `archivo_${downloadId}`;
@@ -279,11 +279,16 @@ export default function WebViewScreen() {
         });
       }
     } catch (error) {
+      console.error('[StreamPay] Error en descarga:', error);
       setActiveDownloads(prev => prev.map(d => d.id === downloadId ? { ...d, status: 'failed' } : d));
-      Alert.alert("Error", "¿Abrir en navegador?", [
-        { text: "No" },
-        { text: "Sí", onPress: () => Linking.openURL(url) }
-      ]);
+      Alert.alert(
+        "Error en descarga", 
+        `No se pudo descargar: ${cleanFilename}\n\n¿Desea reintentar?`, 
+        [
+          { text: "Cancelar", style: "cancel" },
+          { text: "Reintentar", onPress: () => handleDownload(url, cleanFilename) }
+        ]
+      );
     }
   };
 
@@ -308,7 +313,7 @@ export default function WebViewScreen() {
   };
 
   const openFile = async (item: DownloadItem) => { if (item.filePath) await Sharing.shareAsync(item.filePath); };
-  
+
   const deleteDownload = async (item: DownloadItem) => {
     if (item.filePath) try { await FileSystem.deleteAsync(item.filePath); } catch(e) {}
     const newHistory = downloadHistory.filter(d => d.id !== item.id);
