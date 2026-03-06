@@ -22,8 +22,8 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
 
-// Extensiones de archivo que deben descargarse
-const DOWNLOAD_EXTENSIONS = /\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|apk|exe|dmg|iso)$/i;
+// Regex actualizado: quitamos el "$" para detectar extensiones aunque tengan parámetros después
+const DOWNLOAD_EXTENSIONS = /\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|apk|exe|dmg|iso)/i;
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -182,8 +182,6 @@ export default function WebViewScreen() {
   const handleMessage = async (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      console.log('[StreamPay] Mensaje recibido:', data.type, data);
-
       if (data.type === 'fullscreenchange') {
         setIsFullscreen(data.isFullscreen);
         if (data.isFullscreen) await ScreenOrientation.unlockAsync();
@@ -194,66 +192,51 @@ export default function WebViewScreen() {
         if (data.isPlaying) await ScreenOrientation.unlockAsync();
       }
       if (data.type === 'download') {
-        console.log('[StreamPay] Descarga solicitada desde PWA:', data.url, data.filename);
         handleDownload(data.url, data.filename || '');
       }
     } catch (error) {
-      console.error('[StreamPay] Error procesando mensaje:', error);
+      console.error('[StreamPay] Error mensaje:', error);
     }
   };
 
-  const handleDownload = async (url: string, filename: string, headers?: Record<string, string>) => {
+  const handleDownload = async (url: string, filename: string) => {
     const downloadId = Date.now().toString();
-
-    // Extraer nombre del archivo de la URL si no se proporciona
     let cleanFilename = filename;
-    if (!cleanFilename || cleanFilename === 'undefined') {
-      try {
-        const urlObj = new URL(url);
+
+    try {
+      const urlObj = new URL(url);
+      // Extraer nombre del parámetro 'filename' si existe (para tu API)
+      const paramName = urlObj.searchParams.get('filename');
+      if (paramName) cleanFilename = paramName;
+      
+      if (!cleanFilename || cleanFilename === 'undefined') {
         const pathParts = urlObj.pathname.split('/');
         cleanFilename = pathParts[pathParts.length - 1] || `archivo_${downloadId}`;
-        cleanFilename = decodeURIComponent(cleanFilename);
-      } catch {
-        cleanFilename = `archivo_${downloadId}`;
       }
+      cleanFilename = decodeURIComponent(cleanFilename);
+    } catch {
+      if (!cleanFilename) cleanFilename = `archivo_${downloadId}`;
     }
 
-    // Limpiar caracteres no válidos (Corregido regex)
     cleanFilename = cleanFilename.replace(/[<>:"\/\\|?*]/g, '_').trim();
-
-    // Asegurar que tenga extensión correcta
-    if (!/\.[a-z0-9]+$/i.test(cleanFilename)) {
-      cleanFilename += '.mp4';
-    }
-
-    console.log('[StreamPay] Iniciando descarga:', url, 'como:', cleanFilename);
+    if (!/\.[a-z0-9]+$/i.test(cleanFilename)) cleanFilename += '.mp4';
 
     setActiveDownloads(prev => [...prev, { id: downloadId, filename: cleanFilename, url, progress: 0, speed: '0 B/s', status: 'downloading' }]);
     setShowDownloads(true);
 
     try {
-      // Usar cacheDirectory para mayor compatibilidad con MediaLibrary
       const downloadPath = `${FileSystem.cacheDirectory}${cleanFilename}`;
-
-      const downloadHeaders: Record<string, string> = {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-        'Accept': '*/*',
-        'Accept-Encoding': 'identity',
-        ...headers,
-      };
-
       const downloadResumable = FileSystem.createDownloadResumable(
         url, 
         downloadPath, 
-        { headers: downloadHeaders },
+        {},
         (dp) => {
           const progress = dp.totalBytesExpectedToWrite > 0 
             ? (dp.totalBytesWritten / dp.totalBytesExpectedToWrite) * 100 
             : 0;
-          const speed = formatBytes(dp.totalBytesWritten);
           setActiveDownloads(prev => prev.map(d => 
             d.id === downloadId 
-              ? { ...d, progress: isNaN(progress) ? 0 : Math.min(progress, 100), speed: `${speed}` } 
+              ? { ...d, progress: Math.min(progress, 100), speed: formatBytes(dp.totalBytesWritten) } 
               : d
           ));
         }
@@ -262,18 +245,12 @@ export default function WebViewScreen() {
       const result = await downloadResumable.downloadAsync();
 
       if (result && result.uri) {
-        console.log('[StreamPay] Descarga completada en temporal:', result.uri);
-
-        // Solicitar permisos y guardar en galería
         const { status } = await MediaLibrary.requestPermissionsAsync();
         if (status === 'granted') {
           try {
             const asset = await MediaLibrary.createAssetAsync(result.uri);
             await MediaLibrary.createAlbumAsync('StreamPay', asset, false);
-            console.log('[StreamPay] Guardado en galería exitosamente');
-          } catch (mediaError) {
-            console.log('[StreamPay] Error al guardar en galería:', mediaError);
-          }
+          } catch (e) {}
         }
 
         const fileInfo = await FileSystem.getInfoAsync(result.uri);
@@ -296,36 +273,17 @@ export default function WebViewScreen() {
           return h; 
         });
 
-        await Notifications.scheduleNotificationAsync({ 
+        Notifications.scheduleNotificationAsync({ 
           content: { title: '✅ Descarga completa', body: cleanFilename }, 
           trigger: null 
         });
-      } else {
-        throw new Error('No se recibió resultado de la descarga');
       }
-    } catch (error: any) {
-      console.error('[StreamPay] Error en descarga:', error);
-      setActiveDownloads(prev => prev.map(d => 
-        d.id === downloadId ? { ...d, status: 'failed' } : d
-      ));
-
-      Alert.alert(
-        "Error de descarga", 
-        "No se pudo descargar el archivo. ¿Deseas abrirlo en el navegador?",
-        [
-          { text: "Cancelar", style: "cancel", onPress: () => {
-            setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-          }},
-          { text: "Abrir en navegador", onPress: async () => {
-            setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-            try {
-              await Linking.openURL(url);
-            } catch (e) {
-              Alert.alert("Error", "No se pudo abrir el enlace");
-            }
-          }}
-        ]
-      );
+    } catch (error) {
+      setActiveDownloads(prev => prev.map(d => d.id === downloadId ? { ...d, status: 'failed' } : d));
+      Alert.alert("Error", "¿Abrir en navegador?", [
+        { text: "No" },
+        { text: "Sí", onPress: () => Linking.openURL(url) }
+      ]);
     }
   };
 
@@ -339,25 +297,18 @@ export default function WebViewScreen() {
 
   const handleShouldStartLoadWithRequest = (request: WebViewNavigation): boolean => {
     const { url } = request;
-    const isDirectFileDownload = DOWNLOAD_EXTENSIONS.test(url) && !url.includes('action=stream');
+    // Detectar descarga por parámetro o por extensión
+    const isDownload = url.includes('download=1') || (DOWNLOAD_EXTENSIONS.test(url) && !url.includes('action=stream'));
 
-    if (isDirectFileDownload) {
-      console.log('[StreamPay] Interceptada descarga directa:', url);
-      let filename = '';
-      try {
-        const urlObj = new URL(url);
-        const pathParts = urlObj.pathname.split('/');
-        filename = pathParts[pathParts.length - 1] || '';
-      } catch {
-        filename = '';
-      }
-      handleDownload(url, filename);
+    if (isDownload) {
+      handleDownload(url, '');
       return false;
     }
     return true;
   };
 
   const openFile = async (item: DownloadItem) => { if (item.filePath) await Sharing.shareAsync(item.filePath); };
+  
   const deleteDownload = async (item: DownloadItem) => {
     if (item.filePath) try { await FileSystem.deleteAsync(item.filePath); } catch(e) {}
     const newHistory = downloadHistory.filter(d => d.id !== item.id);
@@ -370,41 +321,19 @@ export default function WebViewScreen() {
       window.__streamPayInjected = true;
       
       const notify = (type, payload) => {
-        try {
-          window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload }));
-        } catch(e) {}
+        try { window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload })); } catch(e) {}
       };
       
       document.addEventListener('click', e => {
         const a = e.target.closest('a');
         if (a && a.href) {
           const url = a.href;
-          const downloadAttr = a.getAttribute('download');
-          const href = a.getAttribute('href') || '';
-          
-          const isDownload = 
-            downloadAttr !== null ||
-            url.includes('action=stream') || 
-            url.includes('download=') ||
-            url.includes('/download/') ||
-            href.includes('download') ||
-            /\\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|apk)(\\?.*)?$/i.test(url);
+          const isDownload = a.hasAttribute('download') || url.includes('download=1') || /\\.(mp4|mkv|avi|mp3|pdf|zip|apk)/i.test(url);
             
           if (isDownload) {
             e.preventDefault();
             e.stopPropagation();
-            
-            let filename = downloadAttr || '';
-            if (!filename) {
-              try {
-                const urlObj = new URL(url);
-                filename = urlObj.searchParams.get('filename') || urlObj.searchParams.get('name') || '';
-                if (!filename) {
-                  const pathParts = urlObj.pathname.split('/');
-                  filename = pathParts[pathParts.length - 1] || '';
-                }
-              } catch(e) {}
-            }
+            let filename = a.getAttribute('download') || '';
             notify('download', { url: url, filename: filename });
             return false;
           }
@@ -417,14 +346,11 @@ export default function WebViewScreen() {
             v.setAttribute('data-sp', '1');
             v.addEventListener('play', () => notify('videoState', { isPlaying: true }));
             v.addEventListener('pause', () => notify('videoState', { isPlaying: false }));
-            if (!v.paused) notify('videoState', { isPlaying: true });
           }
         });
       };
       setInterval(checkVideos, 2000);
-      
       document.addEventListener('fullscreenchange', () => notify('fullscreenchange', { isFullscreen: !!document.fullscreenElement }));
-      document.addEventListener('webkitfullscreenchange', () => notify('fullscreenchange', { isFullscreen: !!document.webkitFullscreenElement }));
     })();
     true;
   `;
@@ -445,18 +371,9 @@ export default function WebViewScreen() {
         domStorageEnabled={true}
         allowsFullscreenVideo={true}
         allowsInlineMediaPlayback={true}
-        mixedContentMode="always"
-        allowFileAccess={true}
-        allowFileAccessFromFileURLs={true}
-        allowUniversalAccessFromFileURLs={true}
-        cacheEnabled={true}
-        mediaPlaybackRequiresUserAction={false}
         onShouldStartLoadWithRequest={handleShouldStartLoadWithRequest}
+        onDownloadStart={({ nativeEvent }) => handleDownload(nativeEvent.url, '')}
         originWhitelist={['*']}
-        onFileDownload={({ nativeEvent }) => {
-          handleDownload(nativeEvent.downloadUrl, '');
-        }}
-        userAgent="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
       />
 
       {!isFullscreen && (
@@ -480,9 +397,6 @@ export default function WebViewScreen() {
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); setShowDownloads(true); }}>
                   <Ionicons name="download-outline" size={20} color="#e2e8f0" /><Text style={styles.menuText}>Descargas</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.menuItem} onPress={() => { webViewRef.current?.clearCache?.(true); setShowMenu(false); }}>
-                  <Ionicons name="trash-outline" size={20} color="#e2e8f0" /><Text style={styles.menuText}>Limpiar Caché</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/config')}>
                   <Ionicons name="settings-outline" size={20} color="#e2e8f0" /><Text style={styles.menuText}>Configuración</Text>
