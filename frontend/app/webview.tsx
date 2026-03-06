@@ -71,6 +71,23 @@ export default function WebViewScreen() {
   const clearHideTimeout = useCallback(() => {
     if (hideTimeoutRef.current) { clearTimeout(hideTimeoutRef.current); hideTimeoutRef.current = null; }
   }, []);
+const hideFabButton = useCallback(() => {
+  clearHideTimeout();
+
+  Animated.spring(fabPosition, {
+    toValue: -60, // Valor estimado para ocultar el botón
+    useNativeDriver: true,
+  }).start(() => {
+    setShowFab(false);
+    setShowMenu(false);
+  });
+
+  Animated.timing(swipeIndicatorOpacity, {
+    toValue: 0,
+    duration: 200,
+    useNativeDriver: true,
+  }).start();
+}, [fabPosition, swipeIndicatorOpacity, clearHideTimeout]);
 
   const startHideTimeout = useCallback(() => {
     clearHideTimeout();
