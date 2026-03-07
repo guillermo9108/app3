@@ -71,37 +71,6 @@ export default function WebViewScreen() {
   const clearHideTimeout = useCallback(() => {
     if (hideTimeoutRef.current) { clearTimeout(hideTimeoutRef.current); hideTimeoutRef.current = null; }
   }, []);
-const hideFabButton = useCallback(() => {
-  clearHideTimeout();
-
-  Animated.spring(fabPosition, {
-    toValue: -60, // Valor estimado para ocultar el botón
-    useNativeDriver: true,
-  }).start(() => {
-    setShowFab(false);
-    setShowMenu(false);
-  });
-
-  Animated.timing(swipeIndicatorOpacity, {
-    toValue: 0,
-    duration: 200,
-    useNativeDriver: true,
-  }).start();
-}, [fabPosition, swipeIndicatorOpacity, clearHideTimeout]);
-
-  const startHideTimeout = useCallback(() => {
-    clearHideTimeout();
-    hideTimeoutRef.current = setTimeout(() => {
-      if (!showMenuRef.current && !showDownloadsRef.current) hideFabButton();
-    }, 3000);
-  }, [clearHideTimeout]);
-
-  const showFabButton = useCallback(() => {
-    setShowFab(true);
-    Animated.spring(fabPosition, { toValue: 16, useNativeDriver: true, tension: 50, friction: 7 }).start();
-    Animated.timing(swipeIndicatorOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start();
-    startHideTimeout();
-  }, [fabPosition, swipeIndicatorOpacity, startHideTimeout]);
 
   const hideFabButton = useCallback(() => {
     clearHideTimeout();
@@ -111,6 +80,20 @@ const hideFabButton = useCallback(() => {
     });
     Animated.timing(swipeIndicatorOpacity, { toValue: 1, duration: 300, useNativeDriver: true }).start();
   }, [fabPosition, swipeIndicatorOpacity, clearHideTimeout]);
+
+  const startHideTimeout = useCallback(() => {
+    clearHideTimeout();
+    hideTimeoutRef.current = setTimeout(() => {
+      if (!showMenuRef.current && !showDownloadsRef.current) hideFabButton();
+    }, 3000);
+  }, [clearHideTimeout, hideFabButton]);
+
+  const showFabButton = useCallback(() => {
+    setShowFab(true);
+    Animated.spring(fabPosition, { toValue: 16, useNativeDriver: true, tension: 50, friction: 7 }).start();
+    Animated.timing(swipeIndicatorOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start();
+    startHideTimeout();
+  }, [fabPosition, swipeIndicatorOpacity, startHideTimeout]);
 
   const handleIndicatorPress = useCallback(() => { showFabButton(); }, [showFabButton]);
 
