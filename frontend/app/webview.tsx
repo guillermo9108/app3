@@ -11,6 +11,8 @@ import {
   Platform,
   Linking,
   ActivityIndicator,
+  AppState,
+  AppStateStatus,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
 import { useRouter } from 'expo-router';
@@ -18,18 +20,32 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import * as Notifications from 'expo-notifications';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import { Ionicons } from '@expo/vector-icons';
-import * as Sharing from 'expo-sharing';
+import * as IntentLauncher from 'expo-intent-launcher';
 import * as MediaLibrary from 'expo-media-library';
+import { StorageAccessFramework } from 'expo-file-system';
 
 const DOWNLOAD_EXTENSIONS = /\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|apk|exe|dmg|iso)/i;
+
+// Configurar canal de notificaciones para Android
+if (Platform.OS === 'android') {
+  Notifications.setNotificationChannelAsync('downloads', {
+    name: 'Descargas',
+    importance: Notifications.AndroidImportance.HIGH,
+    vibrationPattern: [0, 250, 250, 250],
+    lightColor: '#6366f1',
+    enableVibrate: true,
+    showBadge: true,
+  });
+}
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
-    shouldPlaySound: true,
+    shouldPlaySound: false,
     shouldSetBadge: true,
+    priority: Notifications.AndroidNotificationPriority.HIGH,
   }),
 });
 
@@ -46,6 +62,7 @@ interface DownloadItem {
   downloadedBytes?: number;
   downloadedAt?: Date;
   error?: string;
+  notificationId?: string;
 }
 
 interface PermissionStatus {
@@ -53,6 +70,56 @@ interface PermissionStatus {
   mediaLibrary: boolean;
   allGranted: boolean;
 }
+
+// Mapa de MIME types extendido para mejor compatibilidad
+const MIME_TYPES: { [key: string]: string } = {
+  // Video
+  'mp4': 'video/mp4',
+  'mkv': 'video/x-matroska',
+  'avi': 'video/x-msvideo',
+  'mov': 'video/quicktime',
+  'wmv': 'video/x-ms-wmv',
+  'flv': 'video/x-flv',
+  'webm': 'video/webm',
+  '3gp': 'video/3gpp',
+  'm4v': 'video/x-m4v',
+  // Audio
+  'mp3': 'audio/mpeg',
+  'wav': 'audio/wav',
+  'aac': 'audio/aac',
+  'flac': 'audio/flac',
+  'ogg': 'audio/ogg',
+  'm4a': 'audio/mp4',
+  'wma': 'audio/x-ms-wma',
+  // Documentos
+  'pdf': 'application/pdf',
+  'doc': 'application/msword',
+  'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'xls': 'application/vnd.ms-excel',
+  'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'ppt': 'application/vnd.ms-powerpoint',
+  'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'txt': 'text/plain',
+  'rtf': 'application/rtf',
+  // Comprimidos
+  'zip': 'application/zip',
+  'rar': 'application/x-rar-compressed',
+  '7z': 'application/x-7z-compressed',
+  'tar': 'application/x-tar',
+  'gz': 'application/gzip',
+  // Otros
+  'apk': 'application/vnd.android.package-archive',
+  'exe': 'application/x-msdownload',
+  'dmg': 'application/x-apple-diskimage',
+  'iso': 'application/x-iso9660-image',
+  // Imágenes
+  'jpg': 'image/jpeg',
+  'jpeg': 'image/jpeg',
+  'png': 'image/png',
+  'gif': 'image/gif',
+  'webp': 'image/webp',
+  'bmp': 'image/bmp',
+};
 
 export default function WebViewScreen() {
   const webViewRef = useRef<WebView>(null);
@@ -78,12 +145,59 @@ export default function WebViewScreen() {
   const showMenuRef = useRef(false);
   const showDownloadsRef = useRef(false);
   const downloadResumablesRef = useRef<Map<string, FileSystem.DownloadResumable>>(new Map());
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const activeDownloadsRef = useRef<DownloadItem[]>([]);
 
   const fabPosition = useRef(new Animated.Value(-60)).current;
   const swipeIndicatorOpacity = useRef(new Animated.Value(1)).current;
 
+  // Mantener referencia actualizada de descargas activas
+  useEffect(() => {
+    activeDownloadsRef.current = activeDownloads;
+  }, [activeDownloads]);
+
   useEffect(() => { showMenuRef.current = showMenu; }, [showMenu]);
   useEffect(() => { showDownloadsRef.current = showDownloads; }, [showDownloads]);
+
+  // Manejar cambios de estado de la app (segundo plano)
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
+  const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+    if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+      // App vuelve al primer plano - actualizar UI
+      console.log('[StreamPay] App en primer plano');
+    } else if (nextAppState.match(/inactive|background/)) {
+      // App va a segundo plano - las descargas continúan
+      console.log('[StreamPay] App en segundo plano - descargas continúan');
+      
+      // Mostrar notificación persistente si hay descargas activas
+      if (activeDownloadsRef.current.length > 0) {
+        await showBackgroundDownloadNotification();
+      }
+    }
+    appStateRef.current = nextAppState;
+  };
+
+  const showBackgroundDownloadNotification = async () => {
+    const activeCount = activeDownloadsRef.current.length;
+    if (activeCount > 0 && permissions.notifications) {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '📥 Descargando en segundo plano',
+          body: `${activeCount} descarga(s) en progreso`,
+          sticky: true,
+          autoDismiss: false,
+        },
+        trigger: null,
+        identifier: 'background-download',
+      });
+    }
+  };
 
   const checkPermissions = async (): Promise<PermissionStatus> => {
     try {
@@ -327,6 +441,68 @@ export default function WebViewScreen() {
     return formatBytes(bytesPerSecond) + '/s';
   };
 
+  const getMimeType = (filename: string): string => {
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    return MIME_TYPES[ext] || 'application/octet-stream';
+  };
+
+  // Función para actualizar notificación de progreso
+  const updateDownloadNotification = async (
+    downloadId: string, 
+    filename: string, 
+    progress: number, 
+    speed: string,
+    isComplete: boolean = false,
+    isFailed: boolean = false
+  ) => {
+    if (!permissions.notifications) return;
+
+    try {
+      const notificationId = `download-${downloadId}`;
+      
+      // Cancelar notificación anterior
+      await Notifications.dismissNotificationAsync(notificationId);
+
+      if (isComplete) {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: '✅ Descarga completada',
+            body: filename,
+            data: { downloadId, type: 'complete' },
+            sound: 'default',
+          },
+          trigger: null,
+          identifier: notificationId,
+        });
+      } else if (isFailed) {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: '❌ Descarga fallida',
+            body: filename,
+            data: { downloadId, type: 'failed' },
+          },
+          trigger: null,
+          identifier: notificationId,
+        });
+      } else {
+        // Notificación de progreso
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: `📥 Descargando: ${Math.round(progress)}%`,
+            body: `${filename}\n${speed}`,
+            data: { downloadId, type: 'progress', progress },
+            sticky: true,
+            autoDismiss: false,
+          },
+          trigger: null,
+          identifier: notificationId,
+        });
+      }
+    } catch (error) {
+      console.error('[StreamPay] Error en notificación:', error);
+    }
+  };
+
   const handleMessage = async (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
@@ -366,6 +542,7 @@ export default function WebViewScreen() {
     let filename = suggestedFilename || extractFilenameFromUrl(url, downloadId);
     filename = sanitizeFilename(filename);
     console.log('[StreamPay] Iniciando descarga:', { url: url.substring(0, 100), filename });
+    
     const newDownload: DownloadItem = {
       id: downloadId,
       filename,
@@ -375,11 +552,19 @@ export default function WebViewScreen() {
       status: 'downloading',
       downloadedBytes: 0,
       totalSize: 0,
+      notificationId: `download-${downloadId}`,
     };
+    
     setActiveDownloads(prev => [...prev, newDownload]);
     setShowDownloads(true);
+
+    // Mostrar notificación inicial
+    await updateDownloadNotification(downloadId, filename, 0, 'Iniciando...');
+
     let lastBytes = 0;
     let lastTime = Date.now();
+    let lastNotificationUpdate = Date.now();
+
     try {
       const downloadPath = `${FileSystem.cacheDirectory}${filename}`;
       const downloadResumable = FileSystem.createDownloadResumable(
@@ -392,7 +577,7 @@ export default function WebViewScreen() {
             'Connection': 'keep-alive',
           },
         },
-        (downloadProgress) => {
+        async (downloadProgress) => {
           const { totalBytesWritten, totalBytesExpectedToWrite } = downloadProgress;
           let progress = 0;
           if (totalBytesExpectedToWrite > 0) {
@@ -409,6 +594,8 @@ export default function WebViewScreen() {
             lastBytes = totalBytesWritten;
             lastTime = now;
           }
+
+          // Actualizar UI
           setActiveDownloads(prev => prev.map(d => 
             d.id === downloadId 
               ? { 
@@ -423,16 +610,27 @@ export default function WebViewScreen() {
                 } 
               : d
           ));
+
+          // Actualizar notificación cada 2 segundos para no saturar
+          if (now - lastNotificationUpdate > 2000) {
+            lastNotificationUpdate = now;
+            await updateDownloadNotification(downloadId, filename, progress, speed);
+          }
         }
       );
+
       downloadResumablesRef.current.set(downloadId, downloadResumable);
       const result = await downloadResumable.downloadAsync();
       downloadResumablesRef.current.delete(downloadId);
+
       if (result && result.uri) {
         const fileInfo = await FileSystem.getInfoAsync(result.uri);
         const fileSize = fileInfo.exists ? (fileInfo as any).size || 0 : 0;
+        let finalFilePath = result.uri;
         let savedToGallery = false;
+
         try {
+          // Guardar en MediaLibrary para acceso desde galería/archivos
           const asset = await MediaLibrary.createAssetAsync(result.uri);
           const album = await MediaLibrary.getAlbumAsync('StreamPay');
           if (album) {
@@ -440,10 +638,13 @@ export default function WebViewScreen() {
           } else {
             await MediaLibrary.createAlbumAsync('StreamPay', asset, false);
           }
+          finalFilePath = asset.uri;
           savedToGallery = true;
         } catch (mediaError) {
           console.warn('[StreamPay] No se pudo guardar en galería:', mediaError);
+          // Mantener archivo en cache si falla MediaLibrary
         }
+
         const completedDownload: DownloadItem = {
           id: downloadId,
           filename,
@@ -451,26 +652,26 @@ export default function WebViewScreen() {
           progress: 100,
           speed: '0 B/s',
           status: 'completed',
-          filePath: result.uri,
+          filePath: finalFilePath,
           size: formatBytes(fileSize),
           downloadedAt: new Date(),
         };
+
         setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
         setDownloadHistory(prev => {
           const newHistory = [completedDownload, ...prev.filter(d => d.id !== downloadId)].slice(0, 100);
           saveDownloadHistory(newHistory);
           return newHistory;
         });
-        if (permissions.notifications) {
-          await Notifications.scheduleNotificationAsync({
-            content: {
-              title: '✅ Descarga completada',
-              body: filename,
-              data: { filePath: result.uri },
-            },
-            trigger: null,
-          });
+
+        // Notificación de completado
+        await updateDownloadNotification(downloadId, filename, 100, '', true);
+
+        // Cancelar notificación de segundo plano si no hay más descargas
+        if (activeDownloadsRef.current.length <= 1) {
+          await Notifications.dismissNotificationAsync('background-download');
         }
+
         console.log('[StreamPay] Descarga completada:', { filename, size: formatBytes(fileSize), savedToGallery });
       } else {
         throw new Error('No se recibió URI del archivo descargado');
@@ -479,11 +680,16 @@ export default function WebViewScreen() {
       console.error('[StreamPay] Error en descarga:', error);
       downloadResumablesRef.current.delete(downloadId);
       const errorMessage = error?.message || 'Error desconocido';
+      
       setActiveDownloads(prev => prev.map(d => 
         d.id === downloadId 
           ? { ...d, status: 'failed', error: errorMessage } 
           : d
       ));
+
+      // Notificación de error
+      await updateDownloadNotification(downloadId, filename, 0, '', false, true);
+
       Alert.alert(
         'Error en descarga',
         `No se pudo descargar: ${filename}\n\nError: ${errorMessage}\n\n¿Qué desea hacer?`,
@@ -520,6 +726,10 @@ export default function WebViewScreen() {
       } catch (e) {}
       downloadResumablesRef.current.delete(downloadId);
     }
+    
+    // Cancelar notificación
+    await Notifications.dismissNotificationAsync(`download-${downloadId}`);
+    
     setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
   };
 
@@ -542,11 +752,13 @@ export default function WebViewScreen() {
     return true;
   };
 
+  // NUEVA FUNCIÓN: Abrir archivo con Intent ACTION_VIEW (muestra apps correctas)
   const openFile = async (item: DownloadItem) => {
     if (!item.filePath) {
       Alert.alert('Error', 'Archivo no encontrado');
       return;
     }
+
     try {
       const fileInfo = await FileSystem.getInfoAsync(item.filePath);
       if (!fileInfo.exists) {
@@ -556,14 +768,61 @@ export default function WebViewScreen() {
         saveDownloadHistory(newHistory);
         return;
       }
-      const canShare = await Sharing.isAvailableAsync();
-      if (canShare) {
-        await Sharing.shareAsync(item.filePath, {
-          mimeType: getMimeType(item.filename),
-          dialogTitle: `Abrir ${item.filename}`,
-        });
+
+      const mimeType = getMimeType(item.filename);
+      
+      if (Platform.OS === 'android') {
+        try {
+          // Convertir URI de archivo a content URI para Android
+          let contentUri = item.filePath;
+          
+          // Si es una URI de archivo, necesitamos usar FileProvider
+          if (item.filePath.startsWith('file://')) {
+            // Usar el content URI directamente si está disponible
+            contentUri = await FileSystem.getContentUriAsync(item.filePath);
+          }
+
+          // Usar IntentLauncher con ACTION_VIEW para mostrar apps correctas
+          await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+            data: contentUri,
+            type: mimeType,
+            flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+          });
+        } catch (intentError: any) {
+          console.warn('[StreamPay] Error con IntentLauncher:', intentError);
+          
+          // Fallback: intentar con Linking
+          try {
+            const contentUri = await FileSystem.getContentUriAsync(item.filePath);
+            await Linking.openURL(contentUri);
+          } catch (linkingError) {
+            console.error('[StreamPay] Error con Linking:', linkingError);
+            Alert.alert(
+              'No se puede abrir',
+              `No hay aplicación instalada para abrir archivos ${mimeType.split('/')[0]}.\n\n¿Desea buscar una en Play Store?`,
+              [
+                { text: 'Cancelar', style: 'cancel' },
+                { 
+                  text: 'Buscar app', 
+                  onPress: () => {
+                    const searchTerm = mimeType.includes('video') ? 'video player' :
+                                      mimeType.includes('audio') ? 'music player' :
+                                      mimeType.includes('pdf') ? 'pdf reader' :
+                                      'file manager';
+                    Linking.openURL(`market://search?q=${searchTerm}`);
+                  }
+                }
+              ]
+            );
+          }
+        }
       } else {
-        Alert.alert('Error', 'Compartir archivos no está disponible');
+        // iOS: usar Linking directamente
+        try {
+          await Linking.openURL(item.filePath);
+        } catch (error) {
+          Alert.alert('Error', 'No se pudo abrir el archivo en iOS');
+        }
       }
     } catch (error) {
       console.error('[StreamPay] Error abriendo archivo:', error);
@@ -571,23 +830,32 @@ export default function WebViewScreen() {
     }
   };
 
-  const getMimeType = (filename: string): string => {
-    const ext = filename.split('.').pop()?.toLowerCase();
-    const mimeTypes: { [key: string]: string } = {
-      'mp4': 'video/mp4',
-      'mkv': 'video/x-matroska',
-      'avi': 'video/x-msvideo',
-      'mov': 'video/quicktime',
-      'mp3': 'audio/mpeg',
-      'wav': 'audio/wav',
-      'pdf': 'application/pdf',
-      'zip': 'application/zip',
-      'rar': 'application/x-rar-compressed',
-      'apk': 'application/vnd.android.package-archive',
-      'doc': 'application/msword',
-      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    };
-    return mimeTypes[ext || ''] || 'application/octet-stream';
+  // Función alternativa para compartir (mantener como opción)
+  const shareFile = async (item: DownloadItem) => {
+    if (!item.filePath) {
+      Alert.alert('Error', 'Archivo no encontrado');
+      return;
+    }
+
+    try {
+      const fileInfo = await FileSystem.getInfoAsync(item.filePath);
+      if (!fileInfo.exists) {
+        Alert.alert('Error', 'El archivo ya no existe');
+        return;
+      }
+
+      if (Platform.OS === 'android') {
+        const contentUri = await FileSystem.getContentUriAsync(item.filePath);
+        await IntentLauncher.startActivityAsync('android.intent.action.SEND', {
+          data: contentUri,
+          type: getMimeType(item.filename),
+          flags: 1,
+        });
+      }
+    } catch (error) {
+      console.error('[StreamPay] Error compartiendo:', error);
+      Alert.alert('Error', 'No se pudo compartir el archivo');
+    }
   };
 
   const deleteDownload = async (item: DownloadItem) => {
@@ -695,7 +963,7 @@ export default function WebViewScreen() {
   return (
     <View style={styles.container}>
       <StatusBar style="light" hidden={isFullscreen} />
-      
+
       {showPermissionModal && (
         <View style={styles.permissionModal}>
           <View style={styles.permissionContent}>
@@ -910,8 +1178,15 @@ export default function WebViewScreen() {
                         style={styles.actionButton} 
                         onPress={() => openFile(item)}
                       >
-                        <Ionicons name="share-outline" size={20} color="#6366f1" />
+                        <Ionicons name="open-outline" size={20} color="#6366f1" />
                         <Text style={styles.actionText}>Abrir</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity 
+                        style={styles.actionButton} 
+                        onPress={() => shareFile(item)}
+                      >
+                        <Ionicons name="share-outline" size={20} color="#10b981" />
+                        <Text style={[styles.actionText, { color: '#10b981' }]}>Compartir</Text>
                       </TouchableOpacity>
                       <TouchableOpacity 
                         style={styles.actionButton} 
@@ -1145,8 +1420,9 @@ const styles = StyleSheet.create({
   },
   downloadActions: { 
     flexDirection: 'row', 
-    gap: 12,
+    gap: 8,
     marginTop: 4,
+    flexWrap: 'wrap',
   },
   actionButton: {
     flexDirection: 'row',
