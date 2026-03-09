@@ -617,6 +617,7 @@ export default function WebViewScreen() {
         let savedToGallery = false;
 
         try {
+          // Guardar en MediaLibrary para acceso desde galería/archivos
           const asset = await MediaLibrary.createAssetAsync(result.uri);
           const album = await MediaLibrary.getAlbumAsync('StreamPay');
           if (album) {
@@ -624,10 +625,13 @@ export default function WebViewScreen() {
           } else {
             await MediaLibrary.createAlbumAsync('StreamPay', asset, false);
           }
-          finalFilePath = asset.uri;
+          // CORRECCIÓN: Mantener el path original (documentDirectory) para poder abrir el archivo
+          // El asset.uri de MediaLibrary no es accesible con FileSystem.getInfoAsync
+          finalFilePath = result.uri;
           savedToGallery = true;
         } catch (mediaError) {
           console.warn('[StreamPay] No se pudo guardar en galería:', mediaError);
+          // Mantener archivo en documentDirectory si falla MediaLibrary
         }
 
         const completedDownload: DownloadItem = {
@@ -738,33 +742,46 @@ export default function WebViewScreen() {
     }
 
     try {
-      const fileInfo = await FileSystem.getInfoAsync(item.filePath);
-      if (!fileInfo.exists) {
-        Alert.alert('Error', 'El archivo ya no existe en el dispositivo');
-        const newHistory = downloadHistory.filter(d => d.id !== item.id);
-        setDownloadHistory(newHistory);
-        saveDownloadHistory(newHistory);
-        return;
+      // Solo verificar existencia si es una URI de archivo local (file://)
+      if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
+        const fileInfo = await FileSystem.getInfoAsync(item.filePath);
+        if (!fileInfo.exists) {
+          Alert.alert('Error', 'El archivo ya no existe en el dispositivo');
+          const newHistory = downloadHistory.filter(d => d.id !== item.id);
+          setDownloadHistory(newHistory);
+          saveDownloadHistory(newHistory);
+          return;
+        }
       }
 
       const mimeType = getMimeType(item.filename);
 
       if (Platform.OS === 'android') {
         try {
+          // Convertir URI de archivo a content URI para Android
           let contentUri = item.filePath;
-          if (item.filePath.startsWith('file://')) {
+
+          // Si es una URI de archivo, necesitamos usar FileProvider
+          if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
             contentUri = await FileSystem.getContentUriAsync(item.filePath);
           }
+
+          // Usar IntentLauncher con ACTION_VIEW para mostrar apps correctas
           await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
             data: contentUri,
             type: mimeType,
-            flags: 1,
+            flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
           });
         } catch (intentError: any) {
           console.warn('[StreamPay] Error con IntentLauncher:', intentError);
+
+          // Fallback: intentar con Linking
           try {
-            const contentUri = await FileSystem.getContentUriAsync(item.filePath);
-            await Linking.openURL(contentUri);
+            let uriToOpen = item.filePath;
+            if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
+              uriToOpen = await FileSystem.getContentUriAsync(item.filePath);
+            }
+            await Linking.openURL(uriToOpen);
           } catch (linkingError) {
             console.error('[StreamPay] Error con Linking:', linkingError);
             Alert.alert(
@@ -787,6 +804,7 @@ export default function WebViewScreen() {
           }
         }
       } else {
+        // iOS: usar Linking directamente
         try {
           await Linking.openURL(item.filePath);
         } catch (error) {
@@ -806,14 +824,20 @@ export default function WebViewScreen() {
     }
 
     try {
-      const fileInfo = await FileSystem.getInfoAsync(item.filePath);
-      if (!fileInfo.exists) {
-        Alert.alert('Error', 'El archivo ya no existe');
-        return;
+      // Solo verificar existencia si es una URI de archivo local
+      if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
+        const fileInfo = await FileSystem.getInfoAsync(item.filePath);
+        if (!fileInfo.exists) {
+          Alert.alert('Error', 'El archivo ya no existe');
+          return;
+        }
       }
 
       if (Platform.OS === 'android') {
-        const contentUri = await FileSystem.getContentUriAsync(item.filePath);
+        let contentUri = item.filePath;
+        if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
+          contentUri = await FileSystem.getContentUriAsync(item.filePath);
+        }
         await IntentLauncher.startActivityAsync('android.intent.action.SEND', {
           data: contentUri,
           type: getMimeType(item.filename),
