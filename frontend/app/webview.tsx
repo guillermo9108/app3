@@ -40,7 +40,7 @@ if (Platform.OS === 'android') {
     showBadge: false,
     sound: undefined,
   });
-  
+
   Notifications.setNotificationChannelAsync('downloads-complete', {
     name: 'Descargas Completadas',
     importance: Notifications.AndroidImportance.HIGH,
@@ -164,7 +164,7 @@ export default function WebViewScreen() {
   const downloadResumablesRef = useRef<Map<string, FileSystem.DownloadResumable>>(new Map());
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const activeDownloadsRef = useRef<DownloadItem[]>([]);
-  
+
   const speedHistoryRef = useRef<Map<string, number[]>>(new Map());
   const lastUpdateTimeRef = useRef<Map<string, number>>(new Map());
 
@@ -231,6 +231,7 @@ export default function WebViewScreen() {
       return { notifications: false, mediaLibrary: false, allGranted: false };
     }
   };
+
   const requestAllPermissions = async () => {
     try {
       const notifResult = await Notifications.requestPermissionsAsync();
@@ -274,9 +275,9 @@ export default function WebViewScreen() {
   };
 
   const clearHideTimeout = useCallback(() => {
-    if (hideTimeoutRef.current) { 
-      clearTimeout(hideTimeoutRef.current); 
-      hideTimeoutRef.current = null; 
+    if (hideTimeoutRef.current) {
+      clearTimeout(hideTimeoutRef.current);
+      hideTimeoutRef.current = null;
     }
   }, []);
 
@@ -303,7 +304,6 @@ export default function WebViewScreen() {
     startHideTimeout();
   }, [fabPosition, swipeIndicatorOpacity, startHideTimeout]);
 
-  // MEJORA #5: Al tocar el indicador, mostrar FAB Y menú directamente
   const handleIndicatorPress = useCallback(() => {
     setShowFab(true);
     setShowMenu(true);
@@ -380,10 +380,10 @@ export default function WebViewScreen() {
   const loadServerUrl = async () => {
     try {
       const url = await AsyncStorage.getItem('SERVER_URL');
-      if (url) setServerUrl(url); 
+      if (url) setServerUrl(url);
       else router.replace('/config');
-    } catch (error) { 
-      router.replace('/config'); 
+    } catch (error) {
+      router.replace('/config');
     }
   };
 
@@ -397,8 +397,8 @@ export default function WebViewScreen() {
   };
 
   const saveDownloadHistory = async (history: DownloadItem[]) => {
-    try { 
-      await AsyncStorage.setItem('DOWNLOAD_HISTORY', JSON.stringify(history.slice(0, 100))); 
+    try {
+      await AsyncStorage.setItem('DOWNLOAD_HISTORY', JSON.stringify(history.slice(0, 100)));
     } catch (error) {
       console.error('[StreamPay] Error guardando historial:', error);
     }
@@ -407,7 +407,7 @@ export default function WebViewScreen() {
   const extractFilenameFromUrl = (url: string, fallbackId: string): string => {
     try {
       const urlObj = new URL(url);
-      const filenameParam = urlObj.searchParams.get('filename') || 
+      const filenameParam = urlObj.searchParams.get('filename') ||
                            urlObj.searchParams.get('file') ||
                            urlObj.searchParams.get('name') ||
                            urlObj.searchParams.get('title');
@@ -422,7 +422,7 @@ export default function WebViewScreen() {
       const queryString = urlObj.search;
       const extMatch = queryString.match(/\.(mp4|mkv|avi|mov|mp3|pdf|zip|rar|apk|doc|docx|xls|xlsx)/i);
       if (extMatch) {
-        const fullMatch = queryString.match(/[&?]filename=([^&]+)/i) || 
+        const fullMatch = queryString.match(/[&?]filename=([^&]+)/i) ||
                          queryString.match(/[&?]file=([^&]+)/i);
         if (fullMatch) {
           return decodeURIComponent(fullMatch[1]);
@@ -461,38 +461,36 @@ export default function WebViewScreen() {
     return formatBytes(bytesPerSecond) + '/s';
   };
 
-  // MEJORA #4: Función para calcular velocidad suavizada
   const calculateSmoothedSpeed = (downloadId: string, currentSpeed: number): number => {
     const alpha = 0.3;
     const history = speedHistoryRef.current.get(downloadId) || [];
-    
+
     history.push(currentSpeed);
     if (history.length > 5) history.shift();
     speedHistoryRef.current.set(downloadId, history);
-    
+
     if (history.length === 1) return currentSpeed;
-    
+
     let ema = history[0];
     for (let i = 1; i < history.length; i++) {
       ema = alpha * history[i] + (1 - alpha) * ema;
     }
-    
+
     return Math.round(ema);
   };
 
-  // MEJORA #4: Función para formatear tiempo restante
   const formatTimeRemaining = (bytesRemaining: number, bytesPerSecond: number): string => {
     if (bytesPerSecond <= 0 || bytesRemaining <= 0) return '';
-    
+
     const seconds = Math.ceil(bytesRemaining / bytesPerSecond);
-    
+
     if (seconds < 60) return `${seconds}s restantes`;
     if (seconds < 3600) {
       const mins = Math.floor(seconds / 60);
       const secs = seconds % 60;
       return `${mins}m ${secs}s restantes`;
     }
-    
+
     const hours = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
     return `${hours}h ${mins}m restantes`;
@@ -503,31 +501,30 @@ export default function WebViewScreen() {
     return MIME_TYPES[ext] || 'application/octet-stream';
   };
 
-  // MEJORA #1: Función para generar miniatura de video
   const generateThumbnail = async (filePath: string, filename: string): Promise<string | null> => {
     try {
       if (!isVideoFile(filename)) {
         return null;
       }
-      
+
       const { uri } = await VideoThumbnails.getThumbnailAsync(filePath, {
         time: 1000,
       });
-      
+
       const thumbnailFilename = `thumb_${Date.now()}.jpg`;
       const thumbnailPath = `${FileSystem.documentDirectory}thumbnails/`;
-      
+
       const dirInfo = await FileSystem.getInfoAsync(thumbnailPath);
       if (!dirInfo.exists) {
         await FileSystem.makeDirectoryAsync(thumbnailPath, { intermediates: true });
       }
-      
+
       const finalThumbnailPath = `${thumbnailPath}${thumbnailFilename}`;
       await FileSystem.copyAsync({
         from: uri,
         to: finalThumbnailPath,
       });
-      
+
       console.log('[StreamPay] Miniatura generada:', finalThumbnailPath);
       return finalThumbnailPath;
     } catch (error) {
@@ -535,11 +532,11 @@ export default function WebViewScreen() {
       return null;
     }
   };
-  // MEJORA #3: Actualizar notificación de forma optimizada
+
   const updateDownloadNotification = async (
-    downloadId: string, 
-    filename: string, 
-    progress: number, 
+    downloadId: string,
+    filename: string,
+    progress: number,
     speed: string,
     timeRemaining: string,
     isComplete: boolean = false,
@@ -576,10 +573,10 @@ export default function WebViewScreen() {
         });
       } else {
         const progressText = `${Math.round(progress)}%`;
-        const bodyText = timeRemaining 
+        const bodyText = timeRemaining
           ? `${speed} • ${timeRemaining}`
           : speed;
-        
+
         await Notifications.scheduleNotificationAsync({
           content: {
             title: `📥 ${filename}`,
@@ -617,7 +614,7 @@ export default function WebViewScreen() {
       console.error('[StreamPay] Error mensaje:', error);
     }
   };
-
+  
   const handleDownload = async (url: string, suggestedFilename: string = '') => {
     const downloadId = Date.now().toString();
     if (!permissions.mediaLibrary) {
@@ -662,6 +659,11 @@ export default function WebViewScreen() {
     let lastTime = Date.now();
     let lastNotificationUpdate = 0;
     let lastUIUpdate = Date.now();
+    
+    // CORRECCIÓN 3: Variables para mantener últimos valores conocidos
+    let lastKnownSpeed = 'Calculando...';
+    let lastSmoothedSpeed = 0;
+    let lastTimeRemaining = '';
 
     try {
       const downloadPath = `${FileSystem.documentDirectory}${filename}`;
@@ -675,6 +677,7 @@ export default function WebViewScreen() {
             'Connection': 'keep-alive',
           },
         },
+        // CORRECCIÓN 3: Callback de progreso con valores persistentes
         async (downloadProgress) => {
           const { totalBytesWritten, totalBytesExpectedToWrite } = downloadProgress;
           let progress = 0;
@@ -687,26 +690,34 @@ export default function WebViewScreen() {
           const now = Date.now();
           const timeDiff = (now - lastTime) / 1000;
           
-          let speed = '0 B/s';
-          let smoothedSpeed = 0;
-          let timeRemaining = '';
+          // CORRECCIÓN 3: Mantener último valor conocido
+          let speed = lastKnownSpeed;
+          let smoothedSpeed = lastSmoothedSpeed;
+          let timeRemaining = lastTimeRemaining;
           
-          if (timeDiff >= 0.5) {
+          // Solo recalcular si pasó suficiente tiempo (500ms)
+          if (timeDiff >= 0.5 && totalBytesWritten > lastBytes) {
             const bytesDiff = totalBytesWritten - lastBytes;
             const rawSpeed = bytesDiff / timeDiff;
             
             smoothedSpeed = calculateSmoothedSpeed(downloadId, rawSpeed);
             speed = formatSpeed(smoothedSpeed);
             
+            // Guardar último valor conocido
+            lastKnownSpeed = speed;
+            lastSmoothedSpeed = smoothedSpeed;
+            
             if (totalBytesExpectedToWrite > 0 && smoothedSpeed > 0) {
               const bytesRemaining = totalBytesExpectedToWrite - totalBytesWritten;
               timeRemaining = formatTimeRemaining(bytesRemaining, smoothedSpeed);
+              lastTimeRemaining = timeRemaining;
             }
             
             lastBytes = totalBytesWritten;
             lastTime = now;
           }
 
+          // Actualizar UI cada 300ms manteniendo últimos valores
           if (now - lastUIUpdate >= 300) {
             lastUIUpdate = now;
             
@@ -715,25 +726,26 @@ export default function WebViewScreen() {
                 ? { 
                     ...d, 
                     progress: Math.min(progress, 99.9),
-                    speed: speed || d.speed,
+                    speed: speed, // Siempre usa el último valor conocido
                     downloadedBytes: totalBytesWritten,
                     totalSize: totalBytesExpectedToWrite,
                     size: totalBytesExpectedToWrite > 0 
                       ? `${formatBytes(totalBytesWritten)} / ${formatBytes(totalBytesExpectedToWrite)}`
                       : formatBytes(totalBytesWritten),
-                    duration: timeRemaining,
+                    duration: timeRemaining, // Siempre usa el último valor conocido
                   } 
                 : d
             ));
           }
 
+          // Actualizar notificación cada 3 segundos
           if (now - lastNotificationUpdate > 3000) {
             lastNotificationUpdate = now;
             await updateDownloadNotification(
               downloadId, 
               filename, 
               progress, 
-              speed || 'Calculando...', 
+              speed, 
               timeRemaining
             );
           }
@@ -743,7 +755,7 @@ export default function WebViewScreen() {
       downloadResumablesRef.current.set(downloadId, downloadResumable);
       const result = await downloadResumable.downloadAsync();
       downloadResumablesRef.current.delete(downloadId);
-      
+
       speedHistoryRef.current.delete(downloadId);
       lastUpdateTimeRef.current.delete(downloadId);
 
@@ -751,28 +763,16 @@ export default function WebViewScreen() {
         const fileInfo = await FileSystem.getInfoAsync(result.uri);
         const fileSize = fileInfo.exists ? (fileInfo as any).size || 0 : 0;
         let finalFilePath = result.uri;
-        let savedToGallery = false;
 
         let thumbnailUri: string | null = null;
         if (isVideoFile(filename)) {
           thumbnailUri = await generateThumbnail(result.uri, filename);
         }
 
-        try {
-          const asset = await MediaLibrary.createAssetAsync(result.uri);
-          
-          const album = await MediaLibrary.getAlbumAsync('StreamPay');
-          if (album) {
-            await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
-          } else {
-            await MediaLibrary.createAlbumAsync('StreamPay', asset, false);
-          }
-          
-          finalFilePath = result.uri;
-          savedToGallery = true;
-        } catch (mediaError) {
-          console.warn('[StreamPay] No se pudo guardar en galería:', mediaError);
-        }
+        // CORRECCIÓN 1: NO usar MediaLibrary para evitar el prompt de permiso de modificación
+        // El archivo se mantiene en documentDirectory y es accesible desde la app
+        finalFilePath = result.uri;
+        console.log('[StreamPay] Archivo guardado en:', finalFilePath);
 
         const completedDownload: DownloadItem = {
           id: downloadId,
@@ -800,7 +800,7 @@ export default function WebViewScreen() {
           await Notifications.dismissNotificationAsync('background-download');
         }
 
-        console.log('[StreamPay] Descarga completada:', { filename, size: formatBytes(fileSize), savedToGallery, hasThumbnail: !!thumbnailUri });
+        console.log('[StreamPay] Descarga completada:', { filename, size: formatBytes(fileSize), hasThumbnail: !!thumbnailUri });
       } else {
         throw new Error('No se recibió URI del archivo descargado');
       }
@@ -811,9 +811,9 @@ export default function WebViewScreen() {
       lastUpdateTimeRef.current.delete(downloadId);
       const errorMessage = error?.message || 'Error desconocido';
 
-      setActiveDownloads(prev => prev.map(d => 
-        d.id === downloadId 
-          ? { ...d, status: 'failed', error: errorMessage } 
+      setActiveDownloads(prev => prev.map(d =>
+        d.id === downloadId
+          ? { ...d, status: 'failed', error: errorMessage }
           : d
       ));
 
@@ -823,13 +823,13 @@ export default function WebViewScreen() {
         'Error en descarga',
         `No se pudo descargar: ${filename}\n\nError: ${errorMessage}\n\n¿Qué desea hacer?`,
         [
-          { 
-            text: 'Cancelar', 
+          {
+            text: 'Cancelar',
             style: 'cancel',
             onPress: () => setActiveDownloads(prev => prev.filter(d => d.id !== downloadId))
           },
-          { 
-            text: 'Reintentar', 
+          {
+            text: 'Reintentar',
             onPress: () => {
               setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
               handleDownload(url, filename);
@@ -846,7 +846,7 @@ export default function WebViewScreen() {
       );
     }
   };
-
+  
   const cancelDownload = async (downloadId: string) => {
     const resumable = downloadResumablesRef.current.get(downloadId);
     if (resumable) {
@@ -879,6 +879,7 @@ export default function WebViewScreen() {
     }
     return true;
   };
+
   const openFile = async (item: DownloadItem) => {
     if (!item.filePath) {
       Alert.alert('Error', 'Archivo no encontrado');
@@ -928,8 +929,8 @@ export default function WebViewScreen() {
               `No hay aplicación instalada para abrir archivos ${mimeType.split('/')[0]}.\n\n¿Desea buscar una en Play Store?`,
               [
                 { text: 'Cancelar', style: 'cancel' },
-                { 
-                  text: 'Buscar app', 
+                {
+                  text: 'Buscar app',
                   onPress: () => {
                     const searchTerm = mimeType.includes('video') ? 'video player' :
                                       mimeType.includes('audio') ? 'music player' :
@@ -987,6 +988,7 @@ export default function WebViewScreen() {
     }
   };
 
+  // CORRECCIÓN 2: Función deleteDownload con verificación de existencia antes de eliminar
   const deleteDownload = async (item: DownloadItem) => {
     Alert.alert(
       'Eliminar descarga',
@@ -997,23 +999,39 @@ export default function WebViewScreen() {
           text: 'Eliminar',
           style: 'destructive',
           onPress: async () => {
+            // Eliminar archivo físico
             if (item.filePath) {
               try {
-                await FileSystem.deleteAsync(item.filePath, { idempotent: true });
+                // Verificar si existe antes de eliminar
+                const fileInfo = await FileSystem.getInfoAsync(item.filePath);
+                if (fileInfo.exists) {
+                  await FileSystem.deleteAsync(item.filePath, { idempotent: true });
+                  console.log('[StreamPay] Archivo eliminado:', item.filePath);
+                }
               } catch (e) {
                 console.warn('[StreamPay] Error eliminando archivo:', e);
               }
             }
+            
+            // Eliminar miniatura si existe
             if (item.thumbnailUri) {
               try {
-                await FileSystem.deleteAsync(item.thumbnailUri, { idempotent: true });
+                const thumbInfo = await FileSystem.getInfoAsync(item.thumbnailUri);
+                if (thumbInfo.exists) {
+                  await FileSystem.deleteAsync(item.thumbnailUri, { idempotent: true });
+                  console.log('[StreamPay] Miniatura eliminada:', item.thumbnailUri);
+                }
               } catch (e) {
                 console.warn('[StreamPay] Error eliminando miniatura:', e);
               }
             }
+            
+            // Actualizar historial
             const newHistory = downloadHistory.filter(d => d.id !== item.id);
             setDownloadHistory(newHistory);
             saveDownloadHistory(newHistory);
+            
+            Alert.alert('Eliminado', 'El archivo ha sido eliminado correctamente.');
           }
         }
       ]
@@ -1048,14 +1066,13 @@ export default function WebViewScreen() {
     if (['apk'].includes(ext)) return 'logo-android';
     return 'document-outline';
   };
-
   const injectedJavaScript = `
     (function() {
       if (window.__streamPayInjected) return;
       window.__streamPayInjected = true;
       const notify = (type, payload) => {
-        try { 
-          window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload })); 
+        try {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload }));
         } catch(e) {
           console.error('StreamPay notify error:', e);
         }
@@ -1121,18 +1138,18 @@ export default function WebViewScreen() {
             </Text>
             <View style={styles.permissionList}>
               <View style={styles.permissionItem}>
-                <Ionicons 
-                  name={permissions.mediaLibrary ? "checkmark-circle" : "close-circle"} 
-                  size={24} 
-                  color={permissions.mediaLibrary ? "#10b981" : "#ef4444"} 
+                <Ionicons
+                  name={permissions.mediaLibrary ? "checkmark-circle" : "close-circle"}
+                  size={24}
+                  color={permissions.mediaLibrary ? "#10b981" : "#ef4444"}
                 />
                 <Text style={styles.permissionItemText}>Almacenamiento (para guardar descargas)</Text>
               </View>
               <View style={styles.permissionItem}>
-                <Ionicons 
-                  name={permissions.notifications ? "checkmark-circle" : "close-circle"} 
-                  size={24} 
-                  color={permissions.notifications ? "#10b981" : "#ef4444"} 
+                <Ionicons
+                  name={permissions.notifications ? "checkmark-circle" : "close-circle"}
+                  size={24}
+                  color={permissions.notifications ? "#10b981" : "#ef4444"}
                 />
                 <Text style={styles.permissionItemText}>Notificaciones (alertas de descarga)</Text>
               </View>
@@ -1140,8 +1157,8 @@ export default function WebViewScreen() {
             <TouchableOpacity style={styles.permissionButton} onPress={requestAllPermissions}>
               <Text style={styles.permissionButtonText}>Otorgar permisos</Text>
             </TouchableOpacity>
-            <TouchableOpacity 
-              style={styles.permissionSkipButton} 
+            <TouchableOpacity
+              style={styles.permissionSkipButton}
               onPress={() => setShowPermissionModal(false)}
             >
               <Text style={styles.permissionSkipText}>Continuar sin permisos</Text>
@@ -1202,15 +1219,15 @@ export default function WebViewScreen() {
             <>
               <TouchableOpacity style={styles.menuOverlay} onPress={() => { setShowMenu(false); startHideTimeout(); }} />
               <Animated.View style={[styles.menu, { transform: [{ translateX: fabPosition }] }]}>
-                <TouchableOpacity 
-                  style={styles.menuItem} 
+                <TouchableOpacity
+                  style={styles.menuItem}
                   onPress={() => { setShowMenu(false); webViewRef.current?.reload(); startHideTimeout(); }}
                 >
                   <Ionicons name="refresh-outline" size={20} color="#e2e8f0" />
                   <Text style={styles.menuText}>Recargar</Text>
                 </TouchableOpacity>
-                <TouchableOpacity 
-                  style={styles.menuItem} 
+                <TouchableOpacity
+                  style={styles.menuItem}
                   onPress={() => { setShowMenu(false); setShowDownloads(true); }}
                 >
                   <Ionicons name="download-outline" size={20} color="#e2e8f0" />
@@ -1223,8 +1240,8 @@ export default function WebViewScreen() {
                     </View>
                   )}
                 </TouchableOpacity>
-                <TouchableOpacity 
-                  style={styles.menuItem} 
+                <TouchableOpacity
+                  style={styles.menuItem}
                   onPress={() => { setShowMenu(false); router.push('/config'); }}
                 >
                   <Ionicons name="settings-outline" size={20} color="#e2e8f0" />
@@ -1235,7 +1252,6 @@ export default function WebViewScreen() {
           )}
         </>
       )}
-
       {showDownloads && !isFullscreen && (
         <View style={styles.downloadsModal}>
           <View style={styles.downloadsHeader}>
@@ -1274,12 +1290,12 @@ export default function WebViewScreen() {
                     </View>
                     <View style={styles.progressContainer}>
                       <View style={styles.progressBg}>
-                        <Animated.View 
+                        <Animated.View
                           style={[
-                            styles.progressBar, 
+                            styles.progressBar,
                             { width: `${item.progress}%` },
                             item.status === 'failed' && styles.progressBarFailed
-                          ]} 
+                          ]}
                         />
                       </View>
                       <Text style={styles.progressText}>{Math.round(item.progress)}%</Text>
@@ -1292,15 +1308,15 @@ export default function WebViewScreen() {
                     <View style={styles.downloadActions}>
                       {item.status === 'failed' ? (
                         <>
-                          <TouchableOpacity 
-                            style={styles.actionButton} 
+                          <TouchableOpacity
+                            style={styles.actionButton}
                             onPress={() => retryDownload(item)}
                           >
                             <Ionicons name="refresh" size={20} color="#6366f1" />
                             <Text style={styles.actionText}>Reintentar</Text>
                           </TouchableOpacity>
-                          <TouchableOpacity 
-                            style={styles.actionButton} 
+                          <TouchableOpacity
+                            style={styles.actionButton}
                             onPress={() => cancelDownload(item.id)}
                           >
                             <Ionicons name="close" size={20} color="#ef4444" />
@@ -1308,8 +1324,8 @@ export default function WebViewScreen() {
                           </TouchableOpacity>
                         </>
                       ) : (
-                        <TouchableOpacity 
-                          style={styles.actionButton} 
+                        <TouchableOpacity
+                          style={styles.actionButton}
                           onPress={() => cancelDownload(item.id)}
                         >
                           <Ionicons name="stop" size={20} color="#ef4444" />
@@ -1328,8 +1344,8 @@ export default function WebViewScreen() {
                   <View key={item.id} style={styles.downloadItem}>
                     <View style={styles.downloadRow}>
                       {item.thumbnailUri ? (
-                        <Image 
-                          source={{ uri: item.thumbnailUri }} 
+                        <Image
+                          source={{ uri: item.thumbnailUri }}
                           style={styles.thumbnail}
                           resizeMode="cover"
                         />
@@ -1351,22 +1367,22 @@ export default function WebViewScreen() {
                       </View>
                     </View>
                     <View style={styles.downloadActions}>
-                      <TouchableOpacity 
-                        style={styles.actionButton} 
+                      <TouchableOpacity
+                        style={styles.actionButton}
                         onPress={() => openFile(item)}
                       >
                         <Ionicons name="open-outline" size={20} color="#6366f1" />
                         <Text style={styles.actionText}>Abrir</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity 
-                        style={styles.actionButton} 
+                      <TouchableOpacity
+                        style={styles.actionButton}
                         onPress={() => shareFile(item)}
                       >
                         <Ionicons name="share-outline" size={20} color="#10b981" />
                         <Text style={[styles.actionText, { color: '#10b981' }]}>Compartir</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity 
-                        style={styles.actionButton} 
+                      <TouchableOpacity
+                        style={styles.actionButton}
                         onPress={() => deleteDownload(item)}
                       >
                         <Ionicons name="trash-outline" size={20} color="#ef4444" />
@@ -1392,27 +1408,28 @@ export default function WebViewScreen() {
     </View>
   );
 }
+
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
+  container: {
+    flex: 1,
     backgroundColor: '#0f172a',
     justifyContent: 'center',
   },
-  webview: { 
-    flex: 1 
+  webview: {
+    flex: 1
   },
-  swipeIndicator: { 
-    position: 'absolute', 
-    top: 60, 
-    left: 0, 
-    width: 32, 
-    height: 48, 
-    backgroundColor: 'rgba(30, 41, 59, 0.95)', 
-    borderTopRightRadius: 12, 
-    borderBottomRightRadius: 12, 
-    justifyContent: 'center', 
-    alignItems: 'center', 
-    zIndex: 100 
+  swipeIndicator: {
+    position: 'absolute',
+    top: 60,
+    left: 0,
+    width: 32,
+    height: 48,
+    backgroundColor: 'rgba(30, 41, 59, 0.95)',
+    borderTopRightRadius: 12,
+    borderBottomRightRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 100
   },
   indicatorContent: {
     alignItems: 'center',
@@ -1434,18 +1451,18 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: 'bold',
   },
-  fabContainer: { 
-    position: 'absolute', 
-    top: 50, 
-    left: 0, 
-    zIndex: 101 
+  fabContainer: {
+    position: 'absolute',
+    top: 50,
+    left: 0,
+    zIndex: 101
   },
-  fab: { 
-    width: 48, 
-    height: 48, 
-    borderRadius: 24, 
-    backgroundColor: '#6366f1', 
-    justifyContent: 'center', 
+  fab: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#6366f1',
+    justifyContent: 'center',
     alignItems: 'center',
     elevation: 4,
     shadowColor: '#000',
@@ -1453,19 +1470,19 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 4,
   },
-  menuOverlay: { 
-    ...StyleSheet.absoluteFillObject, 
-    backgroundColor: 'rgba(0,0,0,0.5)', 
-    zIndex: 102 
+  menuOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    zIndex: 102
   },
-  menu: { 
-    position: 'absolute', 
-    top: 105, 
-    left: 0, 
-    backgroundColor: '#1e293b', 
-    borderRadius: 12, 
-    paddingVertical: 8, 
-    minWidth: 220, 
+  menu: {
+    position: 'absolute',
+    top: 105,
+    left: 0,
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    paddingVertical: 8,
+    minWidth: 220,
     zIndex: 103,
     elevation: 8,
     shadowColor: '#000',
@@ -1473,15 +1490,15 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 8,
   },
-  menuItem: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: 14,
     paddingHorizontal: 16,
   },
-  menuText: { 
-    color: '#e2e8f0', 
-    fontSize: 16, 
+  menuText: {
+    color: '#e2e8f0',
+    fontSize: 16,
     marginLeft: 12,
     flex: 1,
   },
@@ -1499,26 +1516,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: 'bold',
   },
-  downloadsModal: { 
-    ...StyleSheet.absoluteFillObject, 
-    backgroundColor: '#0f172a', 
-    zIndex: 200 
+  downloadsModal: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#0f172a',
+    zIndex: 200
   },
-  downloadsHeader: { 
-    flexDirection: 'row', 
-    justifyContent: 'space-between', 
+  downloadsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingTop: 50, 
+    paddingTop: 50,
     paddingBottom: 16,
     backgroundColor: '#1e293b',
     borderBottomWidth: 1,
     borderBottomColor: '#334155',
   },
-  downloadsTitle: { 
-    color: '#e2e8f0', 
-    fontSize: 22, 
-    fontWeight: 'bold' 
+  downloadsTitle: {
+    color: '#e2e8f0',
+    fontSize: 22,
+    fontWeight: 'bold'
   },
   headerActions: {
     flexDirection: 'row',
@@ -1528,23 +1545,23 @@ const styles = StyleSheet.create({
   headerButton: {
     padding: 8,
   },
-  downloadsContent: { 
+  downloadsContent: {
     flex: 1,
-    padding: 16 
+    padding: 16
   },
-  sectionTitle: { 
-    color: '#94a3b8', 
-    fontSize: 14, 
+  sectionTitle: {
+    color: '#94a3b8',
+    fontSize: 14,
     fontWeight: '600',
     marginTop: 16,
     marginBottom: 12,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
-  downloadItem: { 
-    backgroundColor: '#1e293b', 
-    borderRadius: 12, 
-    padding: 14, 
+  downloadItem: {
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    padding: 14,
     marginBottom: 10,
     borderWidth: 1,
     borderColor: '#334155',
@@ -1573,7 +1590,7 @@ const styles = StyleSheet.create({
   downloadInfo: {
     flex: 1,
   },
-  downloadFilename: { 
+  downloadFilename: {
     color: '#e2e8f0',
     fontSize: 15,
     fontWeight: '500',
@@ -1615,7 +1632,7 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     overflow: 'hidden',
   },
-  progressBar: { 
+  progressBar: {
     height: '100%',
     backgroundColor: '#6366f1',
     borderRadius: 3,
@@ -1640,8 +1657,8 @@ const styles = StyleSheet.create({
     color: '#ef4444',
     fontSize: 12,
   },
-  downloadActions: { 
-    flexDirection: 'row', 
+  downloadActions: {
+    flexDirection: 'row',
     gap: 8,
     marginTop: 4,
     flexWrap: 'wrap',
