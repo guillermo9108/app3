@@ -14,10 +14,11 @@ export default function SplashScreen() {
 
   const checkConfiguration = async () => {
     try {
+      // Simulación de carga
       await new Promise(resolve => setTimeout(resolve, 1500));
       
       const serverUrl = await AsyncStorage.getItem('SERVER_URL');
-      
+
       if (serverUrl) {
         router.replace('/webview');
       } else {
@@ -40,18 +41,18 @@ export default function SplashScreen() {
           <Text style={styles.logoText}>SP</Text>
         </View>
       </View>
-      
+
       <Text style={styles.title}>StreamPay</Text>
       <Text style={styles.subtitle}>Tu plataforma de streaming</Text>
-      
+
       {isChecking && (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color="#6366f1" />
           <Text style={styles.loadingText}>Verificando configuración...</Text>
         </View>
       )}
-      
-      <Text style={styles.version}>v3.0</Text>
+
+      <Text style={styles.version}>v4.1</Text>
     </View>
   );
 }
