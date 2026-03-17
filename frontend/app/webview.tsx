@@ -14,6 +14,7 @@ import {
   AppState,
   AppStateStatus,
   Image,
+  Dimensions,
 } from 'react-native';
 import { WebView, WebViewNavigation } from 'react-native-webview';
 import { useRouter } from 'expo-router';
@@ -27,9 +28,11 @@ import * as IntentLauncher from 'expo-intent-launcher';
 import * as MediaLibrary from 'expo-media-library';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
 const DOWNLOAD_EXTENSIONS = /\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|apk|exe|dmg|iso)/i;
 
-// Configurar canal de notificaciones para Android (MEJORA #3: Configuración optimizada)
+// Configurar canales de notificaciones para Android
 if (Platform.OS === 'android') {
   Notifications.setNotificationChannelAsync('downloads', {
     name: 'Descargas',
@@ -50,14 +53,36 @@ if (Platform.OS === 'android') {
     showBadge: true,
     sound: 'default',
   });
+
+  // Canal para notificaciones del sitio web
+  Notifications.setNotificationChannelAsync('web-notifications', {
+    name: 'Notificaciones del Sitio',
+    importance: Notifications.AndroidImportance.HIGH,
+    vibrationPattern: [0, 250, 250, 250],
+    lightColor: '#6366f1',
+    enableVibrate: true,
+    showBadge: true,
+    sound: 'default',
+  });
+
+  // Canal para controles de audio en segundo plano
+  Notifications.setNotificationChannelAsync('media-playback', {
+    name: 'Reproducción de Audio',
+    importance: Notifications.AndroidImportance.LOW,
+    vibrationPattern: [0],
+    lightColor: '#6366f1',
+    enableVibrate: false,
+    showBadge: false,
+    sound: undefined,
+  });
 }
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: false,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-    priority: Notifications.AndroidNotificationPriority.LOW,
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+    priority: Notifications.AndroidNotificationPriority.HIGH,
   }),
 });
 
@@ -67,7 +92,7 @@ interface DownloadItem {
   url: string;
   progress: number;
   speed: string;
-  status: 'downloading' | 'completed' | 'failed' | 'paused';
+  status: 'downloading' | 'completed' | 'failed' | 'paused' | 'queued';
   filePath?: string;
   size?: string;
   totalSize?: number;
@@ -77,12 +102,49 @@ interface DownloadItem {
   notificationId?: string;
   thumbnailUri?: string;
   duration?: string;
+  resumeData?: string;
 }
 
 interface PermissionStatus {
   notifications: boolean;
   mediaLibrary: boolean;
   allGranted: boolean;
+}
+
+interface MediaInfo {
+  isPlaying: boolean;
+  isVideo: boolean;
+  isAudio: boolean;
+  title?: string;
+  artist?: string;
+  thumbnail?: string;
+  duration?: number;
+  currentTime?: number;
+  videoWidth?: number;
+  videoHeight?: number;
+  isLandscape?: boolean;
+}
+
+interface WebNotification {
+  id: string;
+  title: string;
+  body: string;
+  icon?: string;
+  image?: string;
+  tag?: string;
+  timestamp: number;
+}
+
+interface PlaybackHistoryItem {
+  id: string;
+  url: string;
+  title: string;
+  currentTime: number;
+  duration: number;
+  progress: number;
+  thumbnail?: string;
+  lastPlayed: Date;
+  completed: boolean;
 }
 
 const MIME_TYPES: { [key: string]: string } = {
@@ -149,6 +211,7 @@ export default function WebViewScreen() {
   const [showDownloads, setShowDownloads] = useState(false);
   const [activeDownloads, setActiveDownloads] = useState<DownloadItem[]>([]);
   const [downloadHistory, setDownloadHistory] = useState<DownloadItem[]>([]);
+  const [downloadQueue, setDownloadQueue] = useState<DownloadItem[]>([]);
   const [permissionsChecked, setPermissionsChecked] = useState(false);
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [permissions, setPermissions] = useState<PermissionStatus>({
@@ -157,39 +220,58 @@ export default function WebViewScreen() {
     allGranted: false,
   });
 
+  const [currentMedia, setCurrentMedia] = useState<MediaInfo | null>(null);
+  const [isInBackground, setIsInBackground] = useState(false);
+  
+  const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistoryItem[]>([]);
+  const [showPlaybackHistory, setShowPlaybackHistory] = useState(false);
+
   const isVideoPlayingRef = useRef(false);
-  const hideTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const showMenuRef = useRef(false);
   const showDownloadsRef = useRef(false);
+  const showPlaybackHistoryRef = useRef(false);
   const downloadResumablesRef = useRef<Map<string, FileSystem.DownloadResumable>>(new Map());
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const activeDownloadsRef = useRef<DownloadItem[]>([]);
+  const downloadQueueRef = useRef<DownloadItem[]>([]);
+  const isDownloadingRef = useRef(false);
 
   const speedHistoryRef = useRef<Map<string, number[]>>(new Map());
   const lastUpdateTimeRef = useRef<Map<string, number>>(new Map());
 
-  const fabPosition = useRef(new Animated.Value(-60)).current;
-  const swipeIndicatorOpacity = useRef(new Animated.Value(1)).current;
+  const fabPosition = useRef(new Animated.Value(80)).current;
+  const fabOpacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     activeDownloadsRef.current = activeDownloads;
   }, [activeDownloads]);
 
+  useEffect(() => {
+    downloadQueueRef.current = downloadQueue;
+  }, [downloadQueue]);
+
   useEffect(() => { showMenuRef.current = showMenu; }, [showMenu]);
   useEffect(() => { showDownloadsRef.current = showDownloads; }, [showDownloads]);
+  useEffect(() => { showPlaybackHistoryRef.current = showPlaybackHistory; }, [showPlaybackHistory]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', handleAppStateChange);
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [currentMedia]);
 
   const handleAppStateChange = async (nextAppState: AppStateStatus) => {
     if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
       console.log('[StreamPay] App en primer plano');
+      setIsInBackground(false);
+      await Notifications.dismissNotificationAsync('audio-playback');
     } else if (nextAppState.match(/inactive|background/)) {
-      console.log('[StreamPay] App en segundo plano - descargas continúan');
+      console.log('[StreamPay] App en segundo plano');
+      setIsInBackground(true);
+      if (currentMedia?.isPlaying && currentMedia?.isAudio) {
+        await showAudioNotificationControls();
+      }
       if (activeDownloadsRef.current.length > 0) {
         await showBackgroundDownloadNotification();
       }
@@ -197,12 +279,33 @@ export default function WebViewScreen() {
     appStateRef.current = nextAppState;
   };
 
+  const showAudioNotificationControls = async () => {
+    if (!permissions.notifications || !currentMedia) return;
+
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: currentMedia.title || 'Reproduciendo audio',
+          body: currentMedia.artist || 'StreamPay',
+          data: { type: 'audio-control' },
+          sticky: true,
+          autoDismiss: false,
+          categoryIdentifier: 'media-playback',
+        },
+        trigger: null,
+        identifier: 'audio-playback',
+      });
+    } catch (error) {
+      console.error('[StreamPay] Error mostrando notificación de audio:', error);
+    }
+  };
+
   const showBackgroundDownloadNotification = async () => {
     const activeCount = activeDownloadsRef.current.length;
     if (activeCount > 0 && permissions.notifications) {
       await Notifications.scheduleNotificationAsync({
         content: {
-          title: '📥 Descargando en segundo plano',
+          title: 'Descargando en segundo plano',
           body: `${activeCount} descarga(s) en progreso`,
           sticky: true,
           autoDismiss: false,
@@ -274,108 +377,191 @@ export default function WebViewScreen() {
     }
   };
 
-  const clearHideTimeout = useCallback(() => {
-    if (hideTimeoutRef.current) {
-      clearTimeout(hideTimeoutRef.current);
-      hideTimeoutRef.current = null;
-    }
-  }, []);
+  const showFabButton = useCallback(() => {
+    setShowFab(true);
+    Animated.parallel([
+      Animated.spring(fabPosition, { toValue: 0, useNativeDriver: true, tension: 50, friction: 7 }),
+      Animated.timing(fabOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+    ]).start();
+  }, [fabPosition, fabOpacity]);
 
   const hideFabButton = useCallback(() => {
-    clearHideTimeout();
-    Animated.spring(fabPosition, { toValue: -60, useNativeDriver: true, tension: 50, friction: 7 }).start(() => {
+    Animated.parallel([
+      Animated.spring(fabPosition, { toValue: 80, useNativeDriver: true, tension: 50, friction: 7 }),
+      Animated.timing(fabOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => {
       setShowFab(false);
       setShowMenu(false);
     });
-    Animated.timing(swipeIndicatorOpacity, { toValue: 1, duration: 300, useNativeDriver: true }).start();
-  }, [fabPosition, swipeIndicatorOpacity, clearHideTimeout]);
-
-  const startHideTimeout = useCallback(() => {
-    clearHideTimeout();
-    hideTimeoutRef.current = setTimeout(() => {
-      if (!showMenuRef.current && !showDownloadsRef.current) hideFabButton();
-    }, 3000);
-  }, [clearHideTimeout, hideFabButton]);
-
-  const showFabButton = useCallback(() => {
-    setShowFab(true);
-    Animated.spring(fabPosition, { toValue: 16, useNativeDriver: true, tension: 50, friction: 7 }).start();
-    Animated.timing(swipeIndicatorOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start();
-    startHideTimeout();
-  }, [fabPosition, swipeIndicatorOpacity, startHideTimeout]);
+  }, [fabPosition, fabOpacity]);
 
   const handleIndicatorPress = useCallback(() => {
-    setShowFab(true);
-    setShowMenu(true);
-    Animated.spring(fabPosition, { toValue: 16, useNativeDriver: true, tension: 50, friction: 7 }).start();
-    Animated.timing(swipeIndicatorOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start();
-    clearHideTimeout();
-  }, [fabPosition, swipeIndicatorOpacity, clearHideTimeout]);
+    if (showFab) {
+      hideFabButton();
+    } else {
+      showFabButton();
+    }
+  }, [showFab, showFabButton, hideFabButton]);
 
-  const enterVideoFullscreen = useCallback(() => {
-    webViewRef.current?.injectJavaScript(`
-      (function() {
-        try {
-          const v = document.querySelector('video');
-          if (v) {
-            if (v.requestFullscreen) v.requestFullscreen();
-            else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
-            v.style.position = 'fixed';
-            v.style.top = '0';
-            v.style.left = '0';
-            v.style.width = '100vw';
-            v.style.height = '100vh';
-            v.style.zIndex = '999999';
-            v.style.backgroundColor = 'black';
-            v.style.objectFit = 'contain';
+  const handleVideoFullscreen = useCallback(async (videoWidth: number, videoHeight: number, enterFullscreen: boolean) => {
+    if (enterFullscreen) {
+      const isLandscapeVideo = videoWidth > videoHeight;
+      setIsFullscreen(true);
+      
+      if (isLandscapeVideo) {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+      } else {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
+      }
+      
+      webViewRef.current?.injectJavaScript(`
+        (function() {
+          const video = document.querySelector('video');
+          if (video) {
+            video.style.position = 'fixed';
+            video.style.top = '0';
+            video.style.left = '0';
+            video.style.width = '100vw';
+            video.style.height = '100vh';
+            video.style.zIndex = '999999';
+            video.style.backgroundColor = 'black';
+            video.style.objectFit = 'contain';
+            
+            const downloadButtons = document.querySelectorAll('[download], [data-download], .download-btn, .download-button');
+            downloadButtons.forEach(btn => btn.style.display = 'none');
           }
-        } catch(e) {}
-      })();
-      true;
-    `);
+        })();
+        true;
+      `);
+    } else {
+      setIsFullscreen(false);
+      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
+      
+      webViewRef.current?.injectJavaScript(`
+        (function() {
+          const video = document.querySelector('video');
+          if (video) {
+            video.style.position = '';
+            video.style.top = '';
+            video.style.left = '';
+            video.style.width = '';
+            video.style.height = '';
+            video.style.zIndex = '';
+            video.style.objectFit = '';
+          }
+        })();
+        true;
+      `);
+    }
   }, []);
 
-  const exitFullscreen = () => {
+  const exitFullscreen = async () => {
+    setIsFullscreen(false);
+    await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
+    
     webViewRef.current?.injectJavaScript(`
       try {
         if (document.fullscreenElement) document.exitFullscreen();
         const v = document.querySelector('video');
-        if (v) { v.style.position = ''; v.style.width = ''; v.style.height = ''; }
+        if (v) { 
+          v.style.position = ''; 
+          v.style.width = ''; 
+          v.style.height = ''; 
+          v.style.top = '';
+          v.style.left = '';
+          v.style.zIndex = '';
+        }
       } catch(e) {}
       true;
     `);
   };
 
   const handleBackPress = useCallback(() => {
-    if (showDownloadsRef.current) { setShowDownloads(false); return true; }
-    if (showMenuRef.current) { setShowMenu(false); startHideTimeout(); return true; }
-    if (isFullscreen) { exitFullscreen(); return true; }
-    if (showFab) { hideFabButton(); return true; }
-    if (canGoBack && webViewRef.current) { webViewRef.current.goBack(); return true; }
+    if (showPlaybackHistoryRef.current) {
+      setShowPlaybackHistory(false);
+      return true;
+    }
+    if (showDownloadsRef.current) { 
+      setShowDownloads(false); 
+      return true; 
+    }
+    if (showMenuRef.current) { 
+      setShowMenu(false);
+      hideFabButton();
+      return true; 
+    }
+    if (isFullscreen) { 
+      exitFullscreen(); 
+      return true; 
+    }
+    if (showFab) { 
+      hideFabButton(); 
+      return true; 
+    }
+    if (canGoBack && webViewRef.current) { 
+      webViewRef.current.goBack(); 
+      return true; 
+    }
     return false;
-  }, [canGoBack, showFab, isFullscreen, hideFabButton, startHideTimeout]);
+  }, [canGoBack, showFab, isFullscreen, hideFabButton]);
 
   useEffect(() => {
     loadServerUrl();
     loadDownloadHistory();
+    loadDownloadQueue();
+    loadPlaybackHistory();
     initializePermissions();
-    const subscription = ScreenOrientation.addOrientationChangeListener((event) => {
-      const orientation = event.orientationInfo.orientation;
-      if (isVideoPlayingRef.current && (orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT || orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT)) {
-        setIsFullscreen(true);
-        enterVideoFullscreen();
-      } else if (orientation === ScreenOrientation.Orientation.PORTRAIT_UP) {
-        setIsFullscreen(false);
-      }
-    });
+    
     const backHandler = BackHandler.addEventListener('hardwareBackPress', handleBackPress);
+    setupWebNotificationListener();
+    
     return () => {
       backHandler.remove();
-      subscription.remove();
-      clearHideTimeout();
       ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT).catch(() => {});
     };
-  }, [handleBackPress, enterVideoFullscreen]);
+  }, [handleBackPress]);
+
+  const setupWebNotificationListener = async () => {
+    const subscription = Notifications.addNotificationResponseReceivedListener(response => {
+      const data = response.notification.request.content.data;
+      if (data?.type === 'web-notification' && data?.url) {
+        webViewRef.current?.injectJavaScript(`
+          window.location.href = '${data.url}';
+          true;
+        `);
+      }
+    });
+    return () => subscription.remove();
+  };
+
+  const showWebNotification = async (notification: WebNotification) => {
+    if (!permissions.notifications) return;
+
+    try {
+      const content: any = {
+        title: notification.title,
+        body: notification.body,
+        data: { 
+          type: 'web-notification', 
+          id: notification.id,
+          tag: notification.tag,
+        },
+        categoryIdentifier: 'web-notifications',
+      };
+
+      if (notification.image) {
+        content.attachments = [{ url: notification.image }];
+      }
+
+      await Notifications.scheduleNotificationAsync({
+        content,
+        trigger: null,
+        identifier: `web-notif-${notification.id}`,
+      });
+    } catch (error) {
+      console.error('[StreamPay] Error mostrando notificación web:', error);
+    }
+  };
 
   const loadServerUrl = async () => {
     try {
@@ -386,7 +572,6 @@ export default function WebViewScreen() {
       router.replace('/config');
     }
   };
-
   const loadDownloadHistory = async () => {
     try {
       const history = await AsyncStorage.getItem('DOWNLOAD_HISTORY');
@@ -396,12 +581,160 @@ export default function WebViewScreen() {
     }
   };
 
+  const loadDownloadQueue = async () => {
+    try {
+      const queue = await AsyncStorage.getItem('DOWNLOAD_QUEUE');
+      if (queue) {
+        const parsedQueue = JSON.parse(queue);
+        setDownloadQueue(parsedQueue);
+        if (parsedQueue.length > 0) {
+          processDownloadQueue(parsedQueue);
+        }
+      }
+    } catch (error) {
+      console.error('[StreamPay] Error cargando cola:', error);
+    }
+  };
+
   const saveDownloadHistory = async (history: DownloadItem[]) => {
     try {
       await AsyncStorage.setItem('DOWNLOAD_HISTORY', JSON.stringify(history.slice(0, 100)));
     } catch (error) {
       console.error('[StreamPay] Error guardando historial:', error);
     }
+  };
+
+  const saveDownloadQueue = async (queue: DownloadItem[]) => {
+    try {
+      await AsyncStorage.setItem('DOWNLOAD_QUEUE', JSON.stringify(queue));
+    } catch (error) {
+      console.error('[StreamPay] Error guardando cola:', error);
+    }
+  };
+
+  const loadPlaybackHistory = async () => {
+    try {
+      const history = await AsyncStorage.getItem('PLAYBACK_HISTORY');
+      if (history) setPlaybackHistory(JSON.parse(history));
+    } catch (error) {
+      console.error('[StreamPay] Error cargando historial de reproducción:', error);
+    }
+  };
+
+  const savePlaybackHistory = async (history: PlaybackHistoryItem[]) => {
+    try {
+      await AsyncStorage.setItem('PLAYBACK_HISTORY', JSON.stringify(history.slice(0, 50)));
+    } catch (error) {
+      console.error('[StreamPay] Error guardando historial de reproducción:', error);
+    }
+  };
+
+  const updatePlaybackPosition = (url: string, title: string, currentTime: number, duration: number, thumbnail?: string) => {
+    if (!url || duration <= 0 || currentTime < 5) return;
+    
+    const progress = Math.round((currentTime / duration) * 100);
+    const completed = progress >= 95;
+    const id = btoa(url).replace(/[^a-zA-Z0-9]/g, '').substring(0, 20);
+    
+    setPlaybackHistory(prev => {
+      const existingIndex = prev.findIndex(item => item.id === id);
+      
+      const newItem: PlaybackHistoryItem = {
+        id,
+        url,
+        title: title || 'Video sin título',
+        currentTime,
+        duration,
+        progress,
+        thumbnail,
+        lastPlayed: new Date(),
+        completed,
+      };
+      
+      let newHistory: PlaybackHistoryItem[];
+      if (existingIndex >= 0) {
+        newHistory = [newItem, ...prev.filter((_, i) => i !== existingIndex)];
+      } else {
+        newHistory = [newItem, ...prev];
+      }
+      
+      newHistory = newHistory.slice(0, 50);
+      savePlaybackHistory(newHistory);
+      return newHistory;
+    });
+  };
+
+  const resumeFromHistory = (item: PlaybackHistoryItem) => {
+    setShowPlaybackHistory(false);
+    
+    webViewRef.current?.injectJavaScript(`
+      (function() {
+        window.location.href = '${item.url}';
+        
+        const checkVideo = setInterval(() => {
+          const video = document.querySelector('video');
+          if (video && video.readyState >= 2) {
+            video.currentTime = ${item.currentTime};
+            clearInterval(checkVideo);
+          }
+        }, 500);
+        
+        setTimeout(() => clearInterval(checkVideo), 10000);
+      })();
+      true;
+    `);
+  };
+
+  const deletePlaybackItem = (id: string) => {
+    setPlaybackHistory(prev => {
+      const newHistory = prev.filter(item => item.id !== id);
+      savePlaybackHistory(newHistory);
+      return newHistory;
+    });
+  };
+
+  const clearPlaybackHistory = () => {
+    Alert.alert(
+      'Limpiar historial',
+      '¿Eliminar todo el historial de reproducción?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Limpiar',
+          style: 'destructive',
+          onPress: () => {
+            setPlaybackHistory([]);
+            savePlaybackHistory([]);
+          }
+        }
+      ]
+    );
+  };
+
+  const formatDuration = (seconds: number): string => {
+    if (!seconds || seconds <= 0) return '0:00';
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    if (hrs > 0) {
+      return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const formatTimeAgo = (date: Date): string => {
+    const now = new Date();
+    const diff = now.getTime() - new Date(date).getTime();
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+    
+    if (minutes < 1) return 'Ahora';
+    if (minutes < 60) return `Hace ${minutes}m`;
+    if (hours < 24) return `Hace ${hours}h`;
+    if (days < 7) return `Hace ${days}d`;
+    return new Date(date).toLocaleDateString();
   };
 
   const extractFilenameFromUrl = (url: string, fallbackId: string): string => {
@@ -419,18 +752,8 @@ export default function WebViewScreen() {
       if (lastPart && lastPart.includes('.')) {
         return decodeURIComponent(lastPart);
       }
-      const queryString = urlObj.search;
-      const extMatch = queryString.match(/\.(mp4|mkv|avi|mov|mp3|pdf|zip|rar|apk|doc|docx|xls|xlsx)/i);
-      if (extMatch) {
-        const fullMatch = queryString.match(/[&?]filename=([^&]+)/i) ||
-                         queryString.match(/[&?]file=([^&]+)/i);
-        if (fullMatch) {
-          return decodeURIComponent(fullMatch[1]);
-        }
-      }
       return `descarga_${fallbackId}.mp4`;
     } catch (error) {
-      console.error('[StreamPay] Error extrayendo nombre:', error);
       return `descarga_${fallbackId}.mp4`;
     }
   };
@@ -464,33 +787,26 @@ export default function WebViewScreen() {
   const calculateSmoothedSpeed = (downloadId: string, currentSpeed: number): number => {
     const alpha = 0.3;
     const history = speedHistoryRef.current.get(downloadId) || [];
-
     history.push(currentSpeed);
     if (history.length > 5) history.shift();
     speedHistoryRef.current.set(downloadId, history);
-
     if (history.length === 1) return currentSpeed;
-
     let ema = history[0];
     for (let i = 1; i < history.length; i++) {
       ema = alpha * history[i] + (1 - alpha) * ema;
     }
-
     return Math.round(ema);
   };
 
   const formatTimeRemaining = (bytesRemaining: number, bytesPerSecond: number): string => {
     if (bytesPerSecond <= 0 || bytesRemaining <= 0) return '';
-
     const seconds = Math.ceil(bytesRemaining / bytesPerSecond);
-
     if (seconds < 60) return `${seconds}s restantes`;
     if (seconds < 3600) {
       const mins = Math.floor(seconds / 60);
       const secs = seconds % 60;
       return `${mins}m ${secs}s restantes`;
     }
-
     const hours = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
     return `${hours}h ${mins}m restantes`;
@@ -503,29 +819,16 @@ export default function WebViewScreen() {
 
   const generateThumbnail = async (filePath: string, filename: string): Promise<string | null> => {
     try {
-      if (!isVideoFile(filename)) {
-        return null;
-      }
-
-      const { uri } = await VideoThumbnails.getThumbnailAsync(filePath, {
-        time: 1000,
-      });
-
+      if (!isVideoFile(filename)) return null;
+      const { uri } = await VideoThumbnails.getThumbnailAsync(filePath, { time: 1000 });
       const thumbnailFilename = `thumb_${Date.now()}.jpg`;
       const thumbnailPath = `${FileSystem.documentDirectory}thumbnails/`;
-
       const dirInfo = await FileSystem.getInfoAsync(thumbnailPath);
       if (!dirInfo.exists) {
         await FileSystem.makeDirectoryAsync(thumbnailPath, { intermediates: true });
       }
-
       const finalThumbnailPath = `${thumbnailPath}${thumbnailFilename}`;
-      await FileSystem.copyAsync({
-        from: uri,
-        to: finalThumbnailPath,
-      });
-
-      console.log('[StreamPay] Miniatura generada:', finalThumbnailPath);
+      await FileSystem.copyAsync({ from: uri, to: finalThumbnailPath });
       return finalThumbnailPath;
     } catch (error) {
       console.warn('[StreamPay] Error generando miniatura:', error);
@@ -551,7 +854,7 @@ export default function WebViewScreen() {
         await Notifications.dismissNotificationAsync(notificationId);
         await Notifications.scheduleNotificationAsync({
           content: {
-            title: '✅ Descarga completada',
+            title: 'Descarga completada',
             body: filename,
             data: { downloadId, type: 'complete' },
             sound: 'default',
@@ -564,7 +867,7 @@ export default function WebViewScreen() {
         await Notifications.dismissNotificationAsync(notificationId);
         await Notifications.scheduleNotificationAsync({
           content: {
-            title: '❌ Descarga fallida',
+            title: 'Descarga fallida',
             body: filename,
             data: { downloadId, type: 'failed' },
           },
@@ -573,13 +876,11 @@ export default function WebViewScreen() {
         });
       } else {
         const progressText = `${Math.round(progress)}%`;
-        const bodyText = timeRemaining
-          ? `${speed} • ${timeRemaining}`
-          : speed;
+        const bodyText = timeRemaining ? `${speed} • ${timeRemaining}` : speed;
 
         await Notifications.scheduleNotificationAsync({
           content: {
-            title: `📥 ${filename}`,
+            title: `Descargando: ${filename}`,
             body: `${progressText} - ${bodyText}`,
             data: { downloadId, type: 'progress', progress },
             sticky: true,
@@ -595,129 +896,95 @@ export default function WebViewScreen() {
     }
   };
 
-  const handleMessage = async (event: any) => {
-    try {
-      const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === 'fullscreenchange') {
-        setIsFullscreen(data.isFullscreen);
-        if (data.isFullscreen) await ScreenOrientation.unlockAsync();
-        else await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
-      }
-      if (data.type === 'videoState') {
-        isVideoPlayingRef.current = data.isPlaying;
-        if (data.isPlaying) await ScreenOrientation.unlockAsync();
-      }
-      if (data.type === 'download') {
-        handleDownload(data.url, data.filename || '');
-      }
-    } catch (error) {
-      console.error('[StreamPay] Error mensaje:', error);
-    }
+  const processDownloadQueue = async (queue?: DownloadItem[]) => {
+    const currentQueue = queue || downloadQueueRef.current;
+    
+    if (isDownloadingRef.current || currentQueue.length === 0) return;
+    
+    const nextDownload = currentQueue.find(d => d.status === 'queued');
+    if (!nextDownload) return;
+    
+    isDownloadingRef.current = true;
+    
+    setDownloadQueue(prev => prev.map(d => 
+      d.id === nextDownload.id ? { ...d, status: 'downloading' } : d
+    ));
+    setActiveDownloads(prev => [...prev, { ...nextDownload, status: 'downloading' }]);
+    
+    await executeDownload(nextDownload);
   };
-  
-  const handleDownload = async (url: string, suggestedFilename: string = '') => {
-    const downloadId = Date.now().toString();
-    if (!permissions.mediaLibrary) {
-      const newStatus = await requestAllPermissions();
-      if (!newStatus.mediaLibrary) {
-        Alert.alert(
-          'Permiso requerido',
-          'Se necesita acceso al almacenamiento para descargar archivos.',
-          [
-            { text: 'Abrir Configuración', onPress: () => Linking.openSettings() },
-            { text: 'Cancelar', style: 'cancel' }
-          ]
-        );
-        return;
-      }
-    }
-    let filename = suggestedFilename || extractFilenameFromUrl(url, downloadId);
-    filename = sanitizeFilename(filename);
-    console.log('[StreamPay] Iniciando descarga:', { url: url.substring(0, 100), filename });
 
+  const executeDownload = async (item: DownloadItem) => {
+    const { id: downloadId, url, filename, downloadedBytes: resumeFromBytes } = item;
+    
     speedHistoryRef.current.set(downloadId, []);
     lastUpdateTimeRef.current.set(downloadId, Date.now());
-
-    const newDownload: DownloadItem = {
-      id: downloadId,
-      filename,
-      url,
-      progress: 0,
-      speed: 'Iniciando...',
-      status: 'downloading',
-      downloadedBytes: 0,
-      totalSize: 0,
-      notificationId: `download-${downloadId}`,
-      duration: '',
-    };
-
-    setActiveDownloads(prev => [...prev, newDownload]);
-    setShowDownloads(true);
+    
     await updateDownloadNotification(downloadId, filename, 0, 'Iniciando...', '');
-
-    let lastBytes = 0;
+    
+    let lastBytes = resumeFromBytes || 0;
     let lastTime = Date.now();
     let lastNotificationUpdate = 0;
     let lastUIUpdate = Date.now();
-    
-    // CORRECCIÓN 3: Variables para mantener últimos valores conocidos
     let lastKnownSpeed = 'Calculando...';
     let lastSmoothedSpeed = 0;
     let lastTimeRemaining = '';
 
     try {
       const downloadPath = `${FileSystem.documentDirectory}${filename}`;
+      
+      let headers: any = {
+        'Accept': '*/*',
+        'Accept-Encoding': 'identity',
+        'Connection': 'keep-alive',
+      };
+      
+      if (resumeFromBytes && resumeFromBytes > 0) {
+        headers['Range'] = `bytes=${resumeFromBytes}-`;
+        console.log('[StreamPay] Reanudando descarga desde byte:', resumeFromBytes);
+      }
+      
       const downloadResumable = FileSystem.createDownloadResumable(
         url,
         downloadPath,
-        {
-          headers: {
-            'Accept': '*/*',
-            'Accept-Encoding': 'identity',
-            'Connection': 'keep-alive',
-          },
-        },
-        // CORRECCIÓN 3: Callback de progreso con valores persistentes
+        { headers },
         async (downloadProgress) => {
           const { totalBytesWritten, totalBytesExpectedToWrite } = downloadProgress;
+          const actualBytesWritten = totalBytesWritten + (resumeFromBytes || 0);
+          const actualTotalBytes = totalBytesExpectedToWrite + (resumeFromBytes || 0);
+          
           let progress = 0;
-          if (totalBytesExpectedToWrite > 0) {
-            progress = (totalBytesWritten / totalBytesExpectedToWrite) * 100;
-          } else if (totalBytesWritten > 0) {
-            progress = Math.min(99, totalBytesWritten / 1000000);
+          if (actualTotalBytes > 0) {
+            progress = (actualBytesWritten / actualTotalBytes) * 100;
           }
           
           const now = Date.now();
           const timeDiff = (now - lastTime) / 1000;
           
-          // CORRECCIÓN 3: Mantener último valor conocido
           let speed = lastKnownSpeed;
           let smoothedSpeed = lastSmoothedSpeed;
           let timeRemaining = lastTimeRemaining;
           
-          // Solo recalcular si pasó suficiente tiempo (500ms)
-          if (timeDiff >= 0.5 && totalBytesWritten > lastBytes) {
-            const bytesDiff = totalBytesWritten - lastBytes;
+          if (timeDiff >= 0.5 && actualBytesWritten > lastBytes) {
+            const bytesDiff = actualBytesWritten - lastBytes;
             const rawSpeed = bytesDiff / timeDiff;
             
             smoothedSpeed = calculateSmoothedSpeed(downloadId, rawSpeed);
             speed = formatSpeed(smoothedSpeed);
             
-            // Guardar último valor conocido
             lastKnownSpeed = speed;
             lastSmoothedSpeed = smoothedSpeed;
             
-            if (totalBytesExpectedToWrite > 0 && smoothedSpeed > 0) {
-              const bytesRemaining = totalBytesExpectedToWrite - totalBytesWritten;
+            if (actualTotalBytes > 0 && smoothedSpeed > 0) {
+              const bytesRemaining = actualTotalBytes - actualBytesWritten;
               timeRemaining = formatTimeRemaining(bytesRemaining, smoothedSpeed);
               lastTimeRemaining = timeRemaining;
             }
             
-            lastBytes = totalBytesWritten;
+            lastBytes = actualBytesWritten;
             lastTime = now;
           }
 
-          // Actualizar UI cada 300ms manteniendo últimos valores
           if (now - lastUIUpdate >= 300) {
             lastUIUpdate = now;
             
@@ -726,28 +993,27 @@ export default function WebViewScreen() {
                 ? { 
                     ...d, 
                     progress: Math.min(progress, 99.9),
-                    speed: speed, // Siempre usa el último valor conocido
-                    downloadedBytes: totalBytesWritten,
-                    totalSize: totalBytesExpectedToWrite,
-                    size: totalBytesExpectedToWrite > 0 
-                      ? `${formatBytes(totalBytesWritten)} / ${formatBytes(totalBytesExpectedToWrite)}`
-                      : formatBytes(totalBytesWritten),
-                    duration: timeRemaining, // Siempre usa el último valor conocido
+                    speed,
+                    downloadedBytes: actualBytesWritten,
+                    totalSize: actualTotalBytes,
+                    size: actualTotalBytes > 0 
+                      ? `${formatBytes(actualBytesWritten)} / ${formatBytes(actualTotalBytes)}`
+                      : formatBytes(actualBytesWritten),
+                    duration: timeRemaining,
                   } 
+                : d
+            ));
+            
+            setDownloadQueue(prev => prev.map(d =>
+              d.id === downloadId
+                ? { ...d, downloadedBytes: actualBytesWritten, totalSize: actualTotalBytes }
                 : d
             ));
           }
 
-          // Actualizar notificación cada 3 segundos
           if (now - lastNotificationUpdate > 3000) {
             lastNotificationUpdate = now;
-            await updateDownloadNotification(
-              downloadId, 
-              filename, 
-              progress, 
-              speed, 
-              timeRemaining
-            );
+            await updateDownloadNotification(downloadId, filename, progress, speed, timeRemaining);
           }
         }
       );
@@ -762,17 +1028,11 @@ export default function WebViewScreen() {
       if (result && result.uri) {
         const fileInfo = await FileSystem.getInfoAsync(result.uri);
         const fileSize = fileInfo.exists ? (fileInfo as any).size || 0 : 0;
-        let finalFilePath = result.uri;
-
+        
         let thumbnailUri: string | null = null;
         if (isVideoFile(filename)) {
           thumbnailUri = await generateThumbnail(result.uri, filename);
         }
-
-        // CORRECCIÓN 1: NO usar MediaLibrary para evitar el prompt de permiso de modificación
-        // El archivo se mantiene en documentDirectory y es accesible desde la app
-        finalFilePath = result.uri;
-        console.log('[StreamPay] Archivo guardado en:', finalFilePath);
 
         const completedDownload: DownloadItem = {
           id: downloadId,
@@ -781,13 +1041,18 @@ export default function WebViewScreen() {
           progress: 100,
           speed: '0 B/s',
           status: 'completed',
-          filePath: finalFilePath,
+          filePath: result.uri,
           size: formatBytes(fileSize),
           downloadedAt: new Date(),
           thumbnailUri: thumbnailUri || undefined,
         };
 
         setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
+        setDownloadQueue(prev => {
+          const newQueue = prev.filter(d => d.id !== downloadId);
+          saveDownloadQueue(newQueue);
+          return newQueue;
+        });
         setDownloadHistory(prev => {
           const newHistory = [completedDownload, ...prev.filter(d => d.id !== downloadId)].slice(0, 100);
           saveDownloadHistory(newHistory);
@@ -795,55 +1060,147 @@ export default function WebViewScreen() {
         });
 
         await updateDownloadNotification(downloadId, filename, 100, '', '', true);
-
-        if (activeDownloadsRef.current.length <= 1) {
-          await Notifications.dismissNotificationAsync('background-download');
-        }
-
-        console.log('[StreamPay] Descarga completada:', { filename, size: formatBytes(fileSize), hasThumbnail: !!thumbnailUri });
-      } else {
-        throw new Error('No se recibió URI del archivo descargado');
+        await Notifications.dismissNotificationAsync('background-download');
+        
+        console.log('[StreamPay] Descarga completada:', { filename, size: formatBytes(fileSize) });
       }
     } catch (error: any) {
       console.error('[StreamPay] Error en descarga:', error);
       downloadResumablesRef.current.delete(downloadId);
-      speedHistoryRef.current.delete(downloadId);
-      lastUpdateTimeRef.current.delete(downloadId);
-      const errorMessage = error?.message || 'Error desconocido';
-
+      
+      setDownloadQueue(prev => prev.map(d =>
+        d.id === downloadId ? { ...d, status: 'paused', error: error?.message } : d
+      ));
+      saveDownloadQueue(downloadQueueRef.current);
+      
       setActiveDownloads(prev => prev.map(d =>
-        d.id === downloadId
-          ? { ...d, status: 'failed', error: errorMessage }
-          : d
+        d.id === downloadId ? { ...d, status: 'failed', error: error?.message } : d
       ));
 
       await updateDownloadNotification(downloadId, filename, 0, '', '', false, true);
+    } finally {
+      isDownloadingRef.current = false;
+      setTimeout(() => processDownloadQueue(), 500);
+    }
+  };
 
-      Alert.alert(
-        'Error en descarga',
-        `No se pudo descargar: ${filename}\n\nError: ${errorMessage}\n\n¿Qué desea hacer?`,
-        [
-          {
-            text: 'Cancelar',
-            style: 'cancel',
-            onPress: () => setActiveDownloads(prev => prev.filter(d => d.id !== downloadId))
-          },
-          {
-            text: 'Reintentar',
-            onPress: () => {
-              setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-              handleDownload(url, filename);
-            }
-          },
-          {
-            text: 'Abrir en navegador',
-            onPress: () => {
-              setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-              Linking.openURL(url);
-            }
-          }
-        ]
-      );
+  const handleMessage = async (event: any) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      
+      if (data.type === 'fullscreenchange') {
+        if (data.isFullscreen && data.videoWidth && data.videoHeight) {
+          handleVideoFullscreen(data.videoWidth, data.videoHeight, true);
+        } else if (!data.isFullscreen) {
+          handleVideoFullscreen(0, 0, false);
+        }
+      }
+      
+      if (data.type === 'videoState') {
+        isVideoPlayingRef.current = data.isPlaying;
+        setCurrentMedia({
+          isPlaying: data.isPlaying,
+          isVideo: data.isVideo || false,
+          isAudio: data.isAudio || false,
+          title: data.title,
+          artist: data.artist,
+          thumbnail: data.thumbnail,
+          duration: data.duration,
+          currentTime: data.currentTime,
+          videoWidth: data.videoWidth,
+          videoHeight: data.videoHeight,
+          isLandscape: data.videoWidth > data.videoHeight,
+        });
+        
+        if (data.isVideo && data.url && data.currentTime && data.duration) {
+          updatePlaybackPosition(
+            data.url,
+            data.title || 'Video',
+            data.currentTime,
+            data.duration,
+            data.thumbnail
+          );
+        }
+        
+        if (data.isAudio && data.isPlaying && isInBackground) {
+          await showAudioNotificationControls();
+        }
+      }
+      
+      if (data.type === 'videoProgress') {
+        updatePlaybackPosition(
+          data.url,
+          data.title || 'Video',
+          data.currentTime,
+          data.duration,
+          data.thumbnail
+        );
+      }
+      
+      if (data.type === 'download') {
+        handleDownload(data.url, data.filename || '');
+      }
+      
+      if (data.type === 'webNotification') {
+        await showWebNotification({
+          id: data.id || Date.now().toString(),
+          title: data.title,
+          body: data.body,
+          icon: data.icon,
+          image: data.image,
+          tag: data.tag,
+          timestamp: Date.now(),
+        });
+      }
+    } catch (error) {
+      console.error('[StreamPay] Error mensaje:', error);
+    }
+  };
+  
+  const handleDownload = async (url: string, suggestedFilename: string = '') => {
+    const downloadId = Date.now().toString();
+    
+    if (!permissions.mediaLibrary) {
+      const newStatus = await requestAllPermissions();
+      if (!newStatus.mediaLibrary) {
+        Alert.alert(
+          'Permiso requerido',
+          'Se necesita acceso al almacenamiento para descargar archivos.',
+          [
+            { text: 'Abrir Configuración', onPress: () => Linking.openSettings() },
+            { text: 'Cancelar', style: 'cancel' }
+          ]
+        );
+        return;
+      }
+    }
+    
+    let filename = suggestedFilename || extractFilenameFromUrl(url, downloadId);
+    filename = sanitizeFilename(filename);
+    
+    console.log('[StreamPay] Agregando a cola:', { url: url.substring(0, 100), filename });
+
+    const newDownload: DownloadItem = {
+      id: downloadId,
+      filename,
+      url,
+      progress: 0,
+      speed: 'En cola...',
+      status: 'queued',
+      downloadedBytes: 0,
+      totalSize: 0,
+    };
+
+    setDownloadQueue(prev => {
+      const newQueue = [...prev, newDownload];
+      saveDownloadQueue(newQueue);
+      return newQueue;
+    });
+    
+    setShowDownloads(true);
+    
+    if (!isDownloadingRef.current) {
+      setTimeout(() => processDownloadQueue(), 100);
     }
   };
   
@@ -858,11 +1215,34 @@ export default function WebViewScreen() {
     speedHistoryRef.current.delete(downloadId);
     lastUpdateTimeRef.current.delete(downloadId);
     await Notifications.dismissNotificationAsync(`download-${downloadId}`);
+    
     setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
+    setDownloadQueue(prev => {
+      const newQueue = prev.filter(d => d.id !== downloadId);
+      saveDownloadQueue(newQueue);
+      return newQueue;
+    });
+    
+    isDownloadingRef.current = false;
+    setTimeout(() => processDownloadQueue(), 100);
+  };
+
+  const resumeDownload = async (item: DownloadItem) => {
+    setDownloadQueue(prev => {
+      const filtered = prev.filter(d => d.id !== item.id);
+      const newQueue = [{ ...item, status: 'queued' as const }, ...filtered];
+      saveDownloadQueue(newQueue);
+      return newQueue;
+    });
+    
+    if (!isDownloadingRef.current) {
+      setTimeout(() => processDownloadQueue(), 100);
+    }
   };
 
   const retryDownload = (item: DownloadItem) => {
     setActiveDownloads(prev => prev.filter(d => d.id !== item.id));
+    setDownloadQueue(prev => prev.filter(d => d.id !== item.id));
     handleDownload(item.url, item.filename);
   };
 
@@ -887,15 +1267,13 @@ export default function WebViewScreen() {
     }
 
     try {
-      if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
-        const fileInfo = await FileSystem.getInfoAsync(item.filePath);
-        if (!fileInfo.exists) {
-          Alert.alert('Error', 'El archivo ya no existe en el dispositivo');
-          const newHistory = downloadHistory.filter(d => d.id !== item.id);
-          setDownloadHistory(newHistory);
-          saveDownloadHistory(newHistory);
-          return;
-        }
+      const fileInfo = await FileSystem.getInfoAsync(item.filePath);
+      if (!fileInfo.exists) {
+        Alert.alert('Error', 'El archivo ya no existe en el dispositivo');
+        const newHistory = downloadHistory.filter(d => d.id !== item.id);
+        setDownloadHistory(newHistory);
+        saveDownloadHistory(newHistory);
+        return;
       }
 
       const mimeType = getMimeType(item.filename);
@@ -903,19 +1281,15 @@ export default function WebViewScreen() {
       if (Platform.OS === 'android') {
         try {
           let contentUri = item.filePath;
-
           if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
             contentUri = await FileSystem.getContentUriAsync(item.filePath);
           }
-
           await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
             data: contentUri,
             type: mimeType,
             flags: 1,
           });
-        } catch (intentError: any) {
-          console.warn('[StreamPay] Error con IntentLauncher:', intentError);
-
+        } catch (intentError) {
           try {
             let uriToOpen = item.filePath;
             if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
@@ -923,7 +1297,6 @@ export default function WebViewScreen() {
             }
             await Linking.openURL(uriToOpen);
           } catch (linkingError) {
-            console.error('[StreamPay] Error con Linking:', linkingError);
             Alert.alert(
               'No se puede abrir',
               `No hay aplicación instalada para abrir archivos ${mimeType.split('/')[0]}.\n\n¿Desea buscar una en Play Store?`,
@@ -934,8 +1307,7 @@ export default function WebViewScreen() {
                   onPress: () => {
                     const searchTerm = mimeType.includes('video') ? 'video player' :
                                       mimeType.includes('audio') ? 'music player' :
-                                      mimeType.includes('pdf') ? 'pdf reader' :
-                                      'file manager';
+                                      mimeType.includes('pdf') ? 'pdf reader' : 'file manager';
                     Linking.openURL(`market://search?q=${searchTerm}`);
                   }
                 }
@@ -943,15 +1315,8 @@ export default function WebViewScreen() {
             );
           }
         }
-      } else {
-        try {
-          await Linking.openURL(item.filePath);
-        } catch (error) {
-          Alert.alert('Error', 'No se pudo abrir el archivo en iOS');
-        }
       }
     } catch (error) {
-      console.error('[StreamPay] Error abriendo archivo:', error);
       Alert.alert('Error', 'No se pudo abrir el archivo');
     }
   };
@@ -963,12 +1328,10 @@ export default function WebViewScreen() {
     }
 
     try {
-      if (item.filePath.startsWith('file://') || item.filePath.startsWith('/')) {
-        const fileInfo = await FileSystem.getInfoAsync(item.filePath);
-        if (!fileInfo.exists) {
-          Alert.alert('Error', 'El archivo ya no existe');
-          return;
-        }
+      const fileInfo = await FileSystem.getInfoAsync(item.filePath);
+      if (!fileInfo.exists) {
+        Alert.alert('Error', 'El archivo ya no existe');
+        return;
       }
 
       if (Platform.OS === 'android') {
@@ -983,12 +1346,10 @@ export default function WebViewScreen() {
         });
       }
     } catch (error) {
-      console.error('[StreamPay] Error compartiendo:', error);
       Alert.alert('Error', 'No se pudo compartir el archivo');
     }
   };
 
-  // CORRECCIÓN 2: Función deleteDownload con verificación de existencia antes de eliminar
   const deleteDownload = async (item: DownloadItem) => {
     Alert.alert(
       'Eliminar descarga',
@@ -999,39 +1360,27 @@ export default function WebViewScreen() {
           text: 'Eliminar',
           style: 'destructive',
           onPress: async () => {
-            // Eliminar archivo físico
             if (item.filePath) {
               try {
-                // Verificar si existe antes de eliminar
                 const fileInfo = await FileSystem.getInfoAsync(item.filePath);
                 if (fileInfo.exists) {
                   await FileSystem.deleteAsync(item.filePath, { idempotent: true });
-                  console.log('[StreamPay] Archivo eliminado:', item.filePath);
                 }
-              } catch (e) {
-                console.warn('[StreamPay] Error eliminando archivo:', e);
-              }
+              } catch (e) {}
             }
             
-            // Eliminar miniatura si existe
             if (item.thumbnailUri) {
               try {
                 const thumbInfo = await FileSystem.getInfoAsync(item.thumbnailUri);
                 if (thumbInfo.exists) {
                   await FileSystem.deleteAsync(item.thumbnailUri, { idempotent: true });
-                  console.log('[StreamPay] Miniatura eliminada:', item.thumbnailUri);
                 }
-              } catch (e) {
-                console.warn('[StreamPay] Error eliminando miniatura:', e);
-              }
+              } catch (e) {}
             }
             
-            // Actualizar historial
             const newHistory = downloadHistory.filter(d => d.id !== item.id);
             setDownloadHistory(newHistory);
             saveDownloadHistory(newHistory);
-            
-            Alert.alert('Eliminado', 'El archivo ha sido eliminado correctamente.');
           }
         }
       ]
@@ -1066,17 +1415,21 @@ export default function WebViewScreen() {
     if (['apk'].includes(ext)) return 'logo-android';
     return 'document-outline';
   };
+
+  const getQueuedCount = () => downloadQueue.filter(d => d.status === 'queued').length;
+  const getPausedCount = () => downloadQueue.filter(d => d.status === 'paused').length;
+
   const injectedJavaScript = `
     (function() {
       if (window.__streamPayInjected) return;
       window.__streamPayInjected = true;
+      
       const notify = (type, payload) => {
         try {
           window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload }));
-        } catch(e) {
-          console.error('StreamPay notify error:', e);
-        }
+        } catch(e) {}
       };
+      
       document.addEventListener('click', function(e) {
         const a = e.target.closest('a');
         if (a && a.href) {
@@ -1094,24 +1447,187 @@ export default function WebViewScreen() {
           }
         }
       }, true);
+      
+      const hideDownloadButtons = () => {
+        const selectors = [
+          'video::-internal-media-controls-download-button',
+          '[download]',
+          '.download-btn',
+          '.download-button',
+          '[data-download]',
+          '.vjs-download-button',
+          '.plyr__control[data-plyr="download"]'
+        ];
+        
+        const style = document.createElement('style');
+        style.textContent = selectors.map(s => s + '{ display: none !important; }').join('\\n');
+        document.head.appendChild(style);
+        
+        document.querySelectorAll('video').forEach(v => {
+          v.controlsList = 'nodownload';
+        });
+      };
+      hideDownloadButtons();
+      
       const checkVideos = () => {
         document.querySelectorAll('video').forEach(v => {
           if (!v.hasAttribute('data-sp-observed')) {
             v.setAttribute('data-sp-observed', '1');
-            v.addEventListener('play', () => notify('videoState', { isPlaying: true }));
-            v.addEventListener('pause', () => notify('videoState', { isPlaying: false }));
-            v.addEventListener('ended', () => notify('videoState', { isPlaying: false }));
+            v.controlsList = 'nodownload';
+            
+            const getVideoUrl = () => v.src || v.currentSrc || window.location.href;
+            
+            const getThumbnail = () => {
+              const poster = v.poster;
+              if (poster) return poster;
+              const parent = v.closest('article, .video-container, .player, div');
+              const img = parent?.querySelector('img');
+              return img?.src || '';
+            };
+            
+            v.addEventListener('play', () => {
+              notify('videoState', { 
+                isPlaying: true, 
+                isVideo: true,
+                url: getVideoUrl(),
+                videoWidth: v.videoWidth,
+                videoHeight: v.videoHeight,
+                title: document.title,
+                duration: v.duration,
+                currentTime: v.currentTime,
+                thumbnail: getThumbnail()
+              });
+            });
+            
+            v.addEventListener('pause', () => {
+              notify('videoProgress', {
+                url: getVideoUrl(),
+                title: document.title,
+                currentTime: v.currentTime,
+                duration: v.duration,
+                thumbnail: getThumbnail()
+              });
+              notify('videoState', { isPlaying: false, isVideo: true });
+            });
+            
+            v.addEventListener('ended', () => {
+              notify('videoProgress', {
+                url: getVideoUrl(),
+                title: document.title,
+                currentTime: v.duration,
+                duration: v.duration,
+                thumbnail: getThumbnail()
+              });
+              notify('videoState', { isPlaying: false, isVideo: true });
+            });
+            
+            let lastSaveTime = 0;
+            v.addEventListener('timeupdate', () => {
+              if (v.paused) return;
+              const now = Math.floor(v.currentTime);
+              
+              if (now > 0 && now % 10 === 0 && now !== lastSaveTime) {
+                lastSaveTime = now;
+                notify('videoProgress', {
+                  url: getVideoUrl(),
+                  title: document.title,
+                  currentTime: v.currentTime,
+                  duration: v.duration,
+                  thumbnail: getThumbnail()
+                });
+              }
+            });
+            
+            v.addEventListener('seeked', () => {
+              notify('videoProgress', {
+                url: getVideoUrl(),
+                title: document.title,
+                currentTime: v.currentTime,
+                duration: v.duration,
+                thumbnail: getThumbnail()
+              });
+            });
+          }
+        });
+        
+        document.querySelectorAll('audio').forEach(a => {
+          if (!a.hasAttribute('data-sp-observed')) {
+            a.setAttribute('data-sp-observed', '1');
+            
+            a.addEventListener('play', () => {
+              notify('videoState', { 
+                isPlaying: true, 
+                isAudio: true,
+                title: document.title,
+                duration: a.duration,
+                currentTime: a.currentTime
+              });
+            });
+            
+            a.addEventListener('pause', () => {
+              notify('videoState', { isPlaying: false, isAudio: true });
+            });
+            
+            a.addEventListener('ended', () => {
+              notify('videoState', { isPlaying: false, isAudio: true });
+            });
           }
         });
       };
+      
       setInterval(checkVideos, 2000);
       checkVideos();
+      
       document.addEventListener('fullscreenchange', () => {
-        notify('fullscreenchange', { isFullscreen: !!document.fullscreenElement });
+        const video = document.fullscreenElement?.querySelector('video') || document.fullscreenElement;
+        const isFs = !!document.fullscreenElement;
+        notify('fullscreenchange', { 
+          isFullscreen: isFs,
+          videoWidth: video?.videoWidth || 0,
+          videoHeight: video?.videoHeight || 0
+        });
       });
+      
       document.addEventListener('webkitfullscreenchange', () => {
-        notify('fullscreenchange', { isFullscreen: !!document.webkitFullscreenElement });
+        const video = document.webkitFullscreenElement?.querySelector('video') || document.webkitFullscreenElement;
+        const isFs = !!document.webkitFullscreenElement;
+        notify('fullscreenchange', { 
+          isFullscreen: isFs,
+          videoWidth: video?.videoWidth || 0,
+          videoHeight: video?.videoHeight || 0
+        });
       });
+      
+      if ('Notification' in window) {
+        const OriginalNotification = window.Notification;
+        window.Notification = function(title, options = {}) {
+          notify('webNotification', {
+            title: title,
+            body: options.body || '',
+            icon: options.icon || '',
+            image: options.image || '',
+            tag: options.tag || '',
+            id: Date.now().toString()
+          });
+          return new OriginalNotification(title, options);
+        };
+        window.Notification.permission = OriginalNotification.permission;
+        window.Notification.requestPermission = OriginalNotification.requestPermission.bind(OriginalNotification);
+      }
+      
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.addEventListener('message', (event) => {
+          if (event.data && event.data.type === 'notification') {
+            notify('webNotification', {
+              title: event.data.title || 'Notificación',
+              body: event.data.body || '',
+              icon: event.data.icon || '',
+              image: event.data.image || '',
+              id: Date.now().toString()
+            });
+          }
+        });
+      }
     })();
     true;
   `;
@@ -1181,7 +1697,6 @@ export default function WebViewScreen() {
         mediaPlaybackRequiresUserAction={false}
         onShouldStartLoadWithRequest={handleShouldStartLoadWithRequest}
         onFileDownload={({ nativeEvent }) => {
-          console.log('[StreamPay] onFileDownload:', nativeEvent);
           handleDownload(nativeEvent.downloadUrl, '');
         }}
         originWhitelist={['*']}
@@ -1192,66 +1707,128 @@ export default function WebViewScreen() {
         thirdPartyCookiesEnabled={true}
       />
 
-      {!isFullscreen && (
+      {!isFullscreen && !showFab && (
+        <TouchableOpacity 
+          style={styles.swipeIndicator} 
+          onPress={handleIndicatorPress}
+          activeOpacity={0.7}
+        >
+          <View style={styles.indicatorPill}>
+            <Ionicons name="apps" size={18} color="#6366f1" />
+            {(activeDownloads.length > 0 || getQueuedCount() > 0) && (
+              <View style={styles.indicatorBadge}>
+                <Text style={styles.indicatorBadgeText}>
+                  {activeDownloads.length + getQueuedCount()}
+                </Text>
+              </View>
+            )}
+          </View>
+        </TouchableOpacity>
+      )}
+      {/* FAB - Centro inferior, más abajo */}
+      {!isFullscreen && showFab && (
+        <Animated.View 
+          style={[
+            styles.fabContainer, 
+            { 
+              transform: [{ translateY: fabPosition }],
+              opacity: fabOpacity 
+            }
+          ]}
+        >
+          <TouchableOpacity 
+            style={styles.fab} 
+            onPress={() => {
+              if (showMenu) {
+                setShowMenu(false);
+                hideFabButton();
+              } else {
+                setShowMenu(true);
+              }
+            }}
+          >
+            <Ionicons name={showMenu ? "close" : "menu"} size={26} color="#ffffff" />
+          </TouchableOpacity>
+        </Animated.View>
+      )}
+
+      {/* Menú */}
+      {showMenu && !isFullscreen && (
         <>
-          {!showFab && (
-            <TouchableOpacity style={styles.swipeIndicator} onPress={handleIndicatorPress}>
-              <Animated.View style={{ opacity: swipeIndicatorOpacity }}>
-                <View style={styles.indicatorContent}>
-                  <Ionicons name="chevron-forward" size={20} color="#6366f1" />
-                  {(activeDownloads.length > 0 || downloadHistory.length > 0) && (
-                    <View style={styles.indicatorBadge}>
-                      <Text style={styles.indicatorBadgeText}>
-                        {activeDownloads.length > 0 ? activeDownloads.length : ''}
-                      </Text>
-                    </View>
-                  )}
+          <TouchableOpacity 
+            style={styles.menuOverlay} 
+            onPress={() => { 
+              setShowMenu(false); 
+              hideFabButton();
+            }} 
+          />
+          <View style={styles.menu}>
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => { 
+                setShowMenu(false); 
+                hideFabButton();
+                webViewRef.current?.reload(); 
+              }}
+            >
+              <Ionicons name="refresh-outline" size={22} color="#e2e8f0" />
+              <Text style={styles.menuText}>Recargar</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => { 
+                setShowMenu(false); 
+                setShowPlaybackHistory(true); 
+              }}
+            >
+              <Ionicons name="play-circle-outline" size={22} color="#e2e8f0" />
+              <Text style={styles.menuText}>Continuar viendo</Text>
+              {playbackHistory.filter(h => !h.completed).length > 0 && (
+                <View style={[styles.badge, { backgroundColor: '#10b981' }]}>
+                  <Text style={styles.badgeText}>
+                    {playbackHistory.filter(h => !h.completed).length}
+                  </Text>
                 </View>
-              </Animated.View>
+              )}
             </TouchableOpacity>
-          )}
-          <Animated.View style={[styles.fabContainer, { transform: [{ translateX: fabPosition }] }]}>
-            <TouchableOpacity style={styles.fab} onPress={() => setShowMenu(!showMenu)}>
-              <Ionicons name={showMenu ? "close" : "menu"} size={24} color="#ffffff" />
+            
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => { 
+                setShowMenu(false); 
+                setShowDownloads(true); 
+              }}
+            >
+              <Ionicons name="download-outline" size={22} color="#e2e8f0" />
+              <Text style={styles.menuText}>Descargas</Text>
+              {(activeDownloads.length > 0 || getQueuedCount() > 0 || downloadHistory.length > 0) && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>
+                    {activeDownloads.length + getQueuedCount() > 0 
+                      ? activeDownloads.length + getQueuedCount()
+                      : downloadHistory.length}
+                  </Text>
+                </View>
+              )}
             </TouchableOpacity>
-          </Animated.View>
-          {showMenu && (
-            <>
-              <TouchableOpacity style={styles.menuOverlay} onPress={() => { setShowMenu(false); startHideTimeout(); }} />
-              <Animated.View style={[styles.menu, { transform: [{ translateX: fabPosition }] }]}>
-                <TouchableOpacity
-                  style={styles.menuItem}
-                  onPress={() => { setShowMenu(false); webViewRef.current?.reload(); startHideTimeout(); }}
-                >
-                  <Ionicons name="refresh-outline" size={20} color="#e2e8f0" />
-                  <Text style={styles.menuText}>Recargar</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.menuItem}
-                  onPress={() => { setShowMenu(false); setShowDownloads(true); }}
-                >
-                  <Ionicons name="download-outline" size={20} color="#e2e8f0" />
-                  <Text style={styles.menuText}>Descargas</Text>
-                  {(activeDownloads.length > 0 || downloadHistory.length > 0) && (
-                    <View style={styles.badge}>
-                      <Text style={styles.badgeText}>
-                        {activeDownloads.length > 0 ? activeDownloads.length : downloadHistory.length}
-                      </Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.menuItem}
-                  onPress={() => { setShowMenu(false); router.push('/config'); }}
-                >
-                  <Ionicons name="settings-outline" size={20} color="#e2e8f0" />
-                  <Text style={styles.menuText}>Configuración</Text>
-                </TouchableOpacity>
-              </Animated.View>
-            </>
-          )}
+            
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => { 
+                setShowMenu(false); 
+                hideFabButton();
+                router.push('/config'); 
+              }}
+            >
+              <Ionicons name="settings-outline" size={22} color="#e2e8f0" />
+              <Text style={styles.menuText}>Configuración</Text>
+            </TouchableOpacity>
+          </View>
         </>
       )}
+
+      {/* Panel de descargas */}
       {showDownloads && !isFullscreen && (
         <View style={styles.downloadsModal}>
           <View style={styles.downloadsHeader}>
@@ -1262,11 +1839,15 @@ export default function WebViewScreen() {
                   <Ionicons name="trash-outline" size={22} color="#ef4444" />
                 </TouchableOpacity>
               )}
-              <TouchableOpacity onPress={() => setShowDownloads(false)} style={styles.headerButton}>
-                <Ionicons name="close" size={24} color="#e2e8f0" />
+              <TouchableOpacity 
+                onPress={() => setShowDownloads(false)} 
+                style={styles.headerButton}
+              >
+                <Ionicons name="close" size={26} color="#e2e8f0" />
               </TouchableOpacity>
             </View>
           </View>
+          
           <ScrollView style={styles.downloadsContent} showsVerticalScrollIndicator={false}>
             {activeDownloads.length > 0 && (
               <>
@@ -1290,7 +1871,7 @@ export default function WebViewScreen() {
                     </View>
                     <View style={styles.progressContainer}>
                       <View style={styles.progressBg}>
-                        <Animated.View
+                        <View
                           style={[
                             styles.progressBar,
                             { width: `${item.progress}%` },
@@ -1308,26 +1889,17 @@ export default function WebViewScreen() {
                     <View style={styles.downloadActions}>
                       {item.status === 'failed' ? (
                         <>
-                          <TouchableOpacity
-                            style={styles.actionButton}
-                            onPress={() => retryDownload(item)}
-                          >
+                          <TouchableOpacity style={styles.actionButton} onPress={() => retryDownload(item)}>
                             <Ionicons name="refresh" size={20} color="#6366f1" />
                             <Text style={styles.actionText}>Reintentar</Text>
                           </TouchableOpacity>
-                          <TouchableOpacity
-                            style={styles.actionButton}
-                            onPress={() => cancelDownload(item.id)}
-                          >
+                          <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
                             <Ionicons name="close" size={20} color="#ef4444" />
                             <Text style={[styles.actionText, { color: '#ef4444' }]}>Cancelar</Text>
                           </TouchableOpacity>
                         </>
                       ) : (
-                        <TouchableOpacity
-                          style={styles.actionButton}
-                          onPress={() => cancelDownload(item.id)}
-                        >
+                        <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
                           <Ionicons name="stop" size={20} color="#ef4444" />
                           <Text style={[styles.actionText, { color: '#ef4444' }]}>Cancelar</Text>
                         </TouchableOpacity>
@@ -1337,6 +1909,63 @@ export default function WebViewScreen() {
                 ))}
               </>
             )}
+
+            {getQueuedCount() > 0 && (
+              <>
+                <Text style={styles.sectionTitle}>En cola ({getQueuedCount()})</Text>
+                {downloadQueue.filter(d => d.status === 'queued').map(item => (
+                  <View key={item.id} style={styles.downloadItem}>
+                    <View style={styles.downloadRow}>
+                      <View style={[styles.fileIconContainer, { backgroundColor: 'rgba(148, 163, 184, 0.1)' }]}>
+                        <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#94a3b8" />
+                      </View>
+                      <View style={styles.downloadInfo}>
+                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text>
+                        <Text style={styles.queueText}>Esperando...</Text>
+                      </View>
+                    </View>
+                    <View style={styles.downloadActions}>
+                      <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
+                        <Ionicons name="close" size={20} color="#ef4444" />
+                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+              </>
+            )}
+
+            {getPausedCount() > 0 && (
+              <>
+                <Text style={styles.sectionTitle}>Pausadas ({getPausedCount()})</Text>
+                {downloadQueue.filter(d => d.status === 'paused').map(item => (
+                  <View key={item.id} style={styles.downloadItem}>
+                    <View style={styles.downloadRow}>
+                      <View style={[styles.fileIconContainer, { backgroundColor: 'rgba(251, 191, 36, 0.1)' }]}>
+                        <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#fbbf24" />
+                      </View>
+                      <View style={styles.downloadInfo}>
+                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text>
+                        <Text style={styles.pausedText}>
+                          {item.downloadedBytes ? `${formatBytes(item.downloadedBytes)} descargados` : 'Pausado'}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.downloadActions}>
+                      <TouchableOpacity style={styles.actionButton} onPress={() => resumeDownload(item)}>
+                        <Ionicons name="play" size={20} color="#10b981" />
+                        <Text style={[styles.actionText, { color: '#10b981' }]}>Reanudar</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
+                        <Ionicons name="trash" size={20} color="#ef4444" />
+                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Eliminar</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+              </>
+            )}
+
             {downloadHistory.length > 0 && (
               <>
                 <Text style={styles.sectionTitle}>Historial</Text>
@@ -1367,24 +1996,15 @@ export default function WebViewScreen() {
                       </View>
                     </View>
                     <View style={styles.downloadActions}>
-                      <TouchableOpacity
-                        style={styles.actionButton}
-                        onPress={() => openFile(item)}
-                      >
+                      <TouchableOpacity style={styles.actionButton} onPress={() => openFile(item)}>
                         <Ionicons name="open-outline" size={20} color="#6366f1" />
                         <Text style={styles.actionText}>Abrir</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.actionButton}
-                        onPress={() => shareFile(item)}
-                      >
+                      <TouchableOpacity style={styles.actionButton} onPress={() => shareFile(item)}>
                         <Ionicons name="share-outline" size={20} color="#10b981" />
                         <Text style={[styles.actionText, { color: '#10b981' }]}>Compartir</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.actionButton}
-                        onPress={() => deleteDownload(item)}
-                      >
+                      <TouchableOpacity style={styles.actionButton} onPress={() => deleteDownload(item)}>
                         <Ionicons name="trash-outline" size={20} color="#ef4444" />
                         <Text style={[styles.actionText, { color: '#ef4444' }]}>Eliminar</Text>
                       </TouchableOpacity>
@@ -1393,12 +2013,179 @@ export default function WebViewScreen() {
                 ))}
               </>
             )}
-            {activeDownloads.length === 0 && downloadHistory.length === 0 && (
+
+            {activeDownloads.length === 0 && downloadQueue.length === 0 && downloadHistory.length === 0 && (
               <View style={styles.emptyState}>
                 <Ionicons name="cloud-download-outline" size={64} color="#475569" />
                 <Text style={styles.emptyTitle}>Sin descargas</Text>
                 <Text style={styles.emptyText}>
                   Las descargas aparecerán aquí cuando descargues archivos desde la web.
+                </Text>
+              </View>
+            )}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Panel de Historial de Reproducción */}
+      {showPlaybackHistory && !isFullscreen && (
+        <View style={styles.downloadsModal}>
+          <View style={styles.downloadsHeader}>
+            <Text style={styles.downloadsTitle}>Continuar viendo</Text>
+            <View style={styles.headerActions}>
+              {playbackHistory.length > 0 && (
+                <TouchableOpacity onPress={clearPlaybackHistory} style={styles.headerButton}>
+                  <Ionicons name="trash-outline" size={22} color="#ef4444" />
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity 
+                onPress={() => setShowPlaybackHistory(false)} 
+                style={styles.headerButton}
+              >
+                <Ionicons name="close" size={26} color="#e2e8f0" />
+              </TouchableOpacity>
+            </View>
+          </View>
+          
+          <ScrollView style={styles.downloadsContent} showsVerticalScrollIndicator={false}>
+            {playbackHistory.filter(h => !h.completed).length > 0 && (
+              <>
+                <Text style={styles.sectionTitle}>Sin terminar</Text>
+                {playbackHistory.filter(h => !h.completed).map(item => (
+                  <TouchableOpacity 
+                    key={item.id} 
+                    style={styles.downloadItem}
+                    onPress={() => resumeFromHistory(item)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.downloadRow}>
+                      {item.thumbnail ? (
+                        <View style={styles.thumbnailContainer}>
+                          <Image
+                            source={{ uri: item.thumbnail }}
+                            style={styles.historyThumbnail}
+                            resizeMode="cover"
+                          />
+                          <View style={styles.playOverlay}>
+                            <Ionicons name="play" size={24} color="#fff" />
+                          </View>
+                          <View style={styles.durationBadge}>
+                            <Text style={styles.durationText}>
+                              {formatDuration(item.currentTime)} / {formatDuration(item.duration)}
+                            </Text>
+                          </View>
+                        </View>
+                      ) : (
+                        <View style={[styles.fileIconContainer, { width: 100, height: 60, borderRadius: 8 }]}>
+                          <Ionicons name="videocam" size={28} color="#6366f1" />
+                        </View>
+                      )}
+                      <View style={styles.downloadInfo}>
+                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.title}</Text>
+                        <View style={styles.downloadMeta}>
+                          <Text style={styles.downloadSpeed}>{item.progress}% visto</Text>
+                          <Text style={styles.downloadDate}>{formatTimeAgo(item.lastPlayed)}</Text>
+                        </View>
+                        <View style={styles.historyProgressBg}>
+                          <View style={[styles.historyProgressBar, { width: `${item.progress}%` }]} />
+                        </View>
+                      </View>
+                    </View>
+                    <View style={styles.downloadActions}>
+                      <TouchableOpacity 
+                        style={styles.actionButton} 
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          resumeFromHistory(item);
+                        }}
+                      >
+                        <Ionicons name="play" size={20} color="#10b981" />
+                        <Text style={[styles.actionText, { color: '#10b981' }]}>Continuar</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity 
+                        style={styles.actionButton}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          deletePlaybackItem(item.id);
+                        }}
+                      >
+                        <Ionicons name="close" size={20} color="#ef4444" />
+                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </>
+            )}
+
+            {playbackHistory.filter(h => h.completed).length > 0 && (
+              <>
+                <Text style={styles.sectionTitle}>Vistos recientemente</Text>
+                {playbackHistory.filter(h => h.completed).map(item => (
+                  <TouchableOpacity 
+                    key={item.id} 
+                    style={[styles.downloadItem, { opacity: 0.7 }]}
+                    onPress={() => resumeFromHistory({ ...item, currentTime: 0 })}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.downloadRow}>
+                      {item.thumbnail ? (
+                        <View style={styles.thumbnailContainer}>
+                          <Image
+                            source={{ uri: item.thumbnail }}
+                            style={styles.historyThumbnail}
+                            resizeMode="cover"
+                          />
+                          <View style={styles.completedOverlay}>
+                            <Ionicons name="checkmark-circle" size={24} color="#10b981" />
+                          </View>
+                        </View>
+                      ) : (
+                        <View style={[styles.fileIconContainer, { width: 100, height: 60, borderRadius: 8 }]}>
+                          <Ionicons name="checkmark-circle" size={28} color="#10b981" />
+                        </View>
+                      )}
+                      <View style={styles.downloadInfo}>
+                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.title}</Text>
+                        <View style={styles.downloadMeta}>
+                          <Text style={styles.downloadSize}>{formatDuration(item.duration)}</Text>
+                          <Text style={styles.downloadDate}>{formatTimeAgo(item.lastPlayed)}</Text>
+                        </View>
+                      </View>
+                    </View>
+                    <View style={styles.downloadActions}>
+                      <TouchableOpacity 
+                        style={styles.actionButton}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          resumeFromHistory({ ...item, currentTime: 0 });
+                        }}
+                      >
+                        <Ionicons name="refresh" size={20} color="#6366f1" />
+                        <Text style={styles.actionText}>Ver de nuevo</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity 
+                        style={styles.actionButton}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          deletePlaybackItem(item.id);
+                        }}
+                      >
+                        <Ionicons name="close" size={20} color="#ef4444" />
+                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </>
+            )}
+
+            {playbackHistory.length === 0 && (
+              <View style={styles.emptyState}>
+                <Ionicons name="play-circle-outline" size={64} color="#475569" />
+                <Text style={styles.emptyTitle}>Sin historial</Text>
+                <Text style={styles.emptyText}>
+                  Los videos que veas aparecerán aquí para que puedas continuar donde lo dejaste.
                 </Text>
               </View>
             )}
@@ -1420,69 +2207,70 @@ const styles = StyleSheet.create({
   },
   swipeIndicator: {
     position: 'absolute',
-    top: 60,
-    left: 0,
-    width: 32,
-    height: 48,
-    backgroundColor: 'rgba(30, 41, 59, 0.95)',
-    borderTopRightRadius: 12,
-    borderBottomRightRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 100
+    bottom: 20,
+    alignSelf: 'center',
+    zIndex: 100,
   },
-  indicatorContent: {
+  indicatorPill: {
+    flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: 'rgba(30, 41, 59, 0.95)',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 24,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
   },
   indicatorBadge: {
-    position: 'absolute',
-    top: -8,
-    right: -8,
     backgroundColor: '#ef4444',
-    borderRadius: 8,
-    minWidth: 16,
-    height: 16,
+    borderRadius: 10,
+    minWidth: 18,
+    height: 18,
     justifyContent: 'center',
     alignItems: 'center',
+    marginLeft: 8,
     paddingHorizontal: 4,
   },
   indicatorBadgeText: {
     color: '#fff',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: 'bold',
   },
   fabContainer: {
     position: 'absolute',
-    top: 50,
-    left: 0,
-    zIndex: 101
+    bottom: 20,
+    alignSelf: 'center',
+    zIndex: 101,
   },
   fab: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     backgroundColor: '#6366f1',
     justifyContent: 'center',
     alignItems: 'center',
-    elevation: 4,
+    elevation: 6,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
   },
   menuOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    zIndex: 102
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    zIndex: 102,
   },
   menu: {
     position: 'absolute',
-    top: 105,
-    left: 0,
+    bottom: 90,
+    alignSelf: 'center',
     backgroundColor: '#1e293b',
-    borderRadius: 12,
+    borderRadius: 16,
     paddingVertical: 8,
-    minWidth: 220,
+    minWidth: 200,
     zIndex: 103,
     elevation: 8,
     shadowColor: '#000',
@@ -1494,19 +2282,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 14,
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
   },
   menuText: {
     color: '#e2e8f0',
     fontSize: 16,
-    marginLeft: 12,
+    marginLeft: 14,
     flex: 1,
   },
   badge: {
     backgroundColor: '#6366f1',
     borderRadius: 10,
-    minWidth: 20,
-    height: 20,
+    minWidth: 22,
+    height: 22,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 6,
@@ -1519,13 +2307,13 @@ const styles = StyleSheet.create({
   downloadsModal: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: '#0f172a',
-    zIndex: 200
+    zIndex: 200,
   },
   downloadsHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     paddingTop: 50,
     paddingBottom: 16,
     backgroundColor: '#1e293b',
@@ -1535,7 +2323,7 @@ const styles = StyleSheet.create({
   downloadsTitle: {
     color: '#e2e8f0',
     fontSize: 22,
-    fontWeight: 'bold'
+    fontWeight: 'bold',
   },
   headerActions: {
     flexDirection: 'row',
@@ -1547,11 +2335,11 @@ const styles = StyleSheet.create({
   },
   downloadsContent: {
     flex: 1,
-    padding: 16
+    padding: 16,
   },
   sectionTitle: {
     color: '#94a3b8',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     marginTop: 16,
     marginBottom: 12,
@@ -1574,7 +2362,7 @@ const styles = StyleSheet.create({
   fileIconContainer: {
     width: 50,
     height: 50,
-    borderRadius: 8,
+    borderRadius: 10,
     backgroundColor: 'rgba(99, 102, 241, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
@@ -1583,7 +2371,7 @@ const styles = StyleSheet.create({
   thumbnail: {
     width: 50,
     height: 50,
-    borderRadius: 8,
+    borderRadius: 10,
     marginRight: 12,
     backgroundColor: '#334155',
   },
@@ -1618,6 +2406,15 @@ const styles = StyleSheet.create({
   downloadDate: {
     color: '#64748b',
     fontSize: 12,
+  },
+  queueText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontStyle: 'italic',
+  },
+  pausedText: {
+    color: '#fbbf24',
+    fontSize: 13,
   },
   progressContainer: {
     flexDirection: 'row',
@@ -1764,5 +2561,64 @@ const styles = StyleSheet.create({
   permissionSkipText: {
     color: '#64748b',
     fontSize: 14,
+  },
+  thumbnailContainer: {
+    position: 'relative',
+    width: 100,
+    height: 60,
+    marginRight: 12,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  historyThumbnail: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#334155',
+  },
+  playOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  completedOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  durationBadge: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  durationText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  historyProgressBg: {
+    height: 3,
+    backgroundColor: '#334155',
+    borderRadius: 2,
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  historyProgressBar: {
+    height: '100%',
+    backgroundColor: '#10b981',
+    borderRadius: 2,
   },
 });
