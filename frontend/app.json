@@ -1,15 +1,20 @@
 {
   "expo": {
-    "name": "streampay3.2",
+    "name": "StreamPay",
     "slug": "streampay2",
-    "version": "3.2.0",
+    "version": "4.1.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "frontend",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
     },
     "android": {
       "package": "com.streampay.app",
@@ -29,7 +34,10 @@
         "READ_MEDIA_IMAGES",
         "NOTIFICATIONS",
         "FOREGROUND_SERVICE",
-        "DOWNLOAD_WITHOUT_NOTIFICATION"
+        "FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "DOWNLOAD_WITHOUT_NOTIFICATION",
+        "WAKE_LOCK",
+        "RECEIVE_BOOT_COMPLETED"
       ]
     },
     "web": {
