@@ -54,7 +54,6 @@ if (Platform.OS === 'android') {
     sound: 'default',
   });
 
-  // Canal para notificaciones del sitio web
   Notifications.setNotificationChannelAsync('web-notifications', {
     name: 'Notificaciones del Sitio',
     importance: Notifications.AndroidImportance.HIGH,
@@ -65,7 +64,6 @@ if (Platform.OS === 'android') {
     sound: 'default',
   });
 
-  // Canal para controles de audio en segundo plano
   Notifications.setNotificationChannelAsync('media-playback', {
     name: 'Reproducción de Audio',
     importance: Notifications.AndroidImportance.LOW,
@@ -226,20 +224,26 @@ export default function WebViewScreen() {
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistoryItem[]>([]);
   const [showPlaybackHistory, setShowPlaybackHistory] = useState(false);
 
+  // MEJORA: Guardar la orientación del video actual para mantenerla durante fullscreen
+  const [currentVideoOrientation, setCurrentVideoOrientation] = useState<'portrait' | 'landscape'>('portrait');
+
   const isVideoPlayingRef = useRef(false);
   const showMenuRef = useRef(false);
   const showDownloadsRef = useRef(false);
   const showPlaybackHistoryRef = useRef(false);
+  const canGoBackRef = useRef(false);
   const downloadResumablesRef = useRef<Map<string, FileSystem.DownloadResumable>>(new Map());
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const activeDownloadsRef = useRef<DownloadItem[]>([]);
   const downloadQueueRef = useRef<DownloadItem[]>([]);
   const isDownloadingRef = useRef(false);
+  const isFullscreenRef = useRef(false);
 
   const speedHistoryRef = useRef<Map<string, number[]>>(new Map());
   const lastUpdateTimeRef = useRef<Map<string, number>>(new Map());
 
-  const fabPosition = useRef(new Animated.Value(80)).current;
+  // MEJORA: Animación para FAB lateral derecho
+  const fabPosition = useRef(new Animated.Value(60)).current;
   const fabOpacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -253,6 +257,8 @@ export default function WebViewScreen() {
   useEffect(() => { showMenuRef.current = showMenu; }, [showMenu]);
   useEffect(() => { showDownloadsRef.current = showDownloads; }, [showDownloads]);
   useEffect(() => { showPlaybackHistoryRef.current = showPlaybackHistory; }, [showPlaybackHistory]);
+  useEffect(() => { canGoBackRef.current = canGoBack; }, [canGoBack]);
+  useEffect(() => { isFullscreenRef.current = isFullscreen; }, [isFullscreen]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', handleAppStateChange);
@@ -377,6 +383,7 @@ export default function WebViewScreen() {
     }
   };
 
+  // MEJORA: FAB lateral derecho - mostrar
   const showFabButton = useCallback(() => {
     setShowFab(true);
     Animated.parallel([
@@ -385,9 +392,10 @@ export default function WebViewScreen() {
     ]).start();
   }, [fabPosition, fabOpacity]);
 
+  // MEJORA: FAB lateral derecho - ocultar
   const hideFabButton = useCallback(() => {
     Animated.parallel([
-      Animated.spring(fabPosition, { toValue: 80, useNativeDriver: true, tension: 50, friction: 7 }),
+      Animated.spring(fabPosition, { toValue: 60, useNativeDriver: true, tension: 50, friction: 7 }),
       Animated.timing(fabOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
     ]).start(() => {
       setShowFab(false);
@@ -403,14 +411,19 @@ export default function WebViewScreen() {
     }
   }, [showFab, showFabButton, hideFabButton]);
 
+  // MEJORA: Rotación de video - mantener landscape para videos horizontales
   const handleVideoFullscreen = useCallback(async (videoWidth: number, videoHeight: number, enterFullscreen: boolean) => {
     if (enterFullscreen) {
       const isLandscapeVideo = videoWidth > videoHeight;
       setIsFullscreen(true);
+      setCurrentVideoOrientation(isLandscapeVideo ? 'landscape' : 'portrait');
       
+      // MEJORA: Bloquear la orientación correcta según el video
       if (isLandscapeVideo) {
+        // Para videos horizontales, forzar y bloquear en landscape
         await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
       } else {
+        // Para videos verticales, mantener portrait
         await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
       }
       
@@ -435,6 +448,8 @@ export default function WebViewScreen() {
       `);
     } else {
       setIsFullscreen(false);
+      setCurrentVideoOrientation('portrait');
+      // MEJORA: Al salir de fullscreen, volver a portrait
       await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
       
       webViewRef.current?.injectJavaScript(`
@@ -457,6 +472,7 @@ export default function WebViewScreen() {
 
   const exitFullscreen = async () => {
     setIsFullscreen(false);
+    setCurrentVideoOrientation('portrait');
     await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
     
     webViewRef.current?.injectJavaScript(`
@@ -476,34 +492,62 @@ export default function WebViewScreen() {
     `);
   };
 
+  // MEJORA: handleBackPress - SIEMPRE consumir el evento, nunca cerrar la app
   const handleBackPress = useCallback(() => {
+    // Cerrar panel de historial de reproducción y volver a la web
     if (showPlaybackHistoryRef.current) {
       setShowPlaybackHistory(false);
+      // MEJORA: Al cerrar "Continuar viendo", también navegar atrás en la web si es posible
+
+      if (canGoBackRef.current && webViewRef.current) {
+        webViewRef.current.goBack();
+      }
       return true;
     }
+    
+    // Cerrar panel de descargas
     if (showDownloadsRef.current) { 
       setShowDownloads(false); 
       return true; 
     }
+    
+    // Cerrar menú y FAB
     if (showMenuRef.current) { 
       setShowMenu(false);
       hideFabButton();
       return true; 
     }
-    if (isFullscreen) { 
+    
+    // Salir de fullscreen
+    if (isFullscreenRef.current) { 
       exitFullscreen(); 
       return true; 
     }
+    
+    // Ocultar FAB si está visible
     if (showFab) { 
       hideFabButton(); 
       return true; 
     }
-    if (canGoBack && webViewRef.current) { 
+    
+    // Navegar atrás en el WebView
+    if (canGoBackRef.current && webViewRef.current) { 
       webViewRef.current.goBack(); 
       return true; 
     }
-    return false;
-  }, [canGoBack, showFab, isFullscreen, hideFabButton]);
+    
+    // MEJORA: Si no hay nada más que hacer, mostrar diálogo de confirmación para salir
+    // En lugar de dejar que el sistema cierre la app, siempre consumimos el evento
+    Alert.alert(
+      'Salir de la aplicación',
+      '¿Deseas salir de StreamPay?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Salir', style: 'destructive', onPress: () => BackHandler.exitApp() }
+      ]
+    );
+    return true; // SIEMPRE retornar true para evitar que la app se cierre/minimice
+  }, [showFab, hideFabButton]);
 
   useEffect(() => {
     loadServerUrl();
@@ -1707,14 +1751,15 @@ export default function WebViewScreen() {
         thirdPartyCookiesEnabled={true}
       />
 
+      {/* MEJORA: Indicador lateral derecho - borde sutil tipo pleca "<" */}
       {!isFullscreen && !showFab && (
         <TouchableOpacity 
-          style={styles.swipeIndicator} 
+          style={styles.sideIndicator} 
           onPress={handleIndicatorPress}
           activeOpacity={0.7}
         >
-          <View style={styles.indicatorPill}>
-            <Ionicons name="apps" size={18} color="#6366f1" />
+          <View style={styles.indicatorTab}>
+            <Ionicons name="chevron-back" size={16} color="#6366f1" />
             {(activeDownloads.length > 0 || getQueuedCount() > 0) && (
               <View style={styles.indicatorBadge}>
                 <Text style={styles.indicatorBadgeText}>
@@ -1725,13 +1770,14 @@ export default function WebViewScreen() {
           </View>
         </TouchableOpacity>
       )}
-      {/* FAB - Centro inferior, más abajo */}
+      
+      {/* MEJORA: FAB lateral derecho centrado verticalmente */}
       {!isFullscreen && showFab && (
         <Animated.View 
           style={[
-            styles.fabContainer, 
+            styles.fabContainerRight, 
             { 
-              transform: [{ translateY: fabPosition }],
+              transform: [{ translateX: fabPosition }],
               opacity: fabOpacity 
             }
           ]}
@@ -1752,7 +1798,7 @@ export default function WebViewScreen() {
         </Animated.View>
       )}
 
-      {/* Menú */}
+      {/* MEJORA: Menú lateral derecho */}
       {showMenu && !isFullscreen && (
         <>
           <TouchableOpacity 
@@ -1762,7 +1808,7 @@ export default function WebViewScreen() {
               hideFabButton();
             }} 
           />
-          <View style={styles.menu}>
+          <View style={styles.menuRight}>
             <TouchableOpacity
               style={styles.menuItem}
               onPress={() => { 
@@ -1871,12 +1917,12 @@ export default function WebViewScreen() {
                     </View>
                     <View style={styles.progressContainer}>
                       <View style={styles.progressBg}>
-                        <View
+                        <View 
                           style={[
-                            styles.progressBar,
-                            { width: `${item.progress}%` },
+                            styles.progressBar, 
+                            { width: `${Math.min(item.progress, 100)}%` },
                             item.status === 'failed' && styles.progressBarFailed
-                          ]}
+                          ]} 
                         />
                       </View>
                       <Text style={styles.progressText}>{Math.round(item.progress)}%</Text>
@@ -1900,7 +1946,7 @@ export default function WebViewScreen() {
                         </>
                       ) : (
                         <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
-                          <Ionicons name="stop" size={20} color="#ef4444" />
+                          <Ionicons name="close" size={20} color="#ef4444" />
                           <Text style={[styles.actionText, { color: '#ef4444' }]}>Cancelar</Text>
                         </TouchableOpacity>
                       )}
@@ -1916,7 +1962,7 @@ export default function WebViewScreen() {
                 {downloadQueue.filter(d => d.status === 'queued').map(item => (
                   <View key={item.id} style={styles.downloadItem}>
                     <View style={styles.downloadRow}>
-                      <View style={[styles.fileIconContainer, { backgroundColor: 'rgba(148, 163, 184, 0.1)' }]}>
+                      <View style={styles.fileIconContainer}>
                         <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#94a3b8" />
                       </View>
                       <View style={styles.downloadInfo}>
@@ -1941,7 +1987,7 @@ export default function WebViewScreen() {
                 {downloadQueue.filter(d => d.status === 'paused').map(item => (
                   <View key={item.id} style={styles.downloadItem}>
                     <View style={styles.downloadRow}>
-                      <View style={[styles.fileIconContainer, { backgroundColor: 'rgba(251, 191, 36, 0.1)' }]}>
+                      <View style={styles.fileIconContainer}>
                         <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#fbbf24" />
                       </View>
                       <View style={styles.downloadInfo}>
@@ -1953,11 +1999,13 @@ export default function WebViewScreen() {
                     </View>
                     <View style={styles.downloadActions}>
                       <TouchableOpacity style={styles.actionButton} onPress={() => resumeDownload(item)}>
+
+                      <TouchableOpacity style={styles.actionButton} onPress={() => resumeDownload(item)}>
                         <Ionicons name="play" size={20} color="#10b981" />
                         <Text style={[styles.actionText, { color: '#10b981' }]}>Reanudar</Text>
                       </TouchableOpacity>
                       <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
-                        <Ionicons name="trash" size={20} color="#ef4444" />
+                        <Ionicons name="trash-outline" size={20} color="#ef4444" />
                         <Text style={[styles.actionText, { color: '#ef4444' }]}>Eliminar</Text>
                       </TouchableOpacity>
                     </View>
@@ -1973,14 +2021,14 @@ export default function WebViewScreen() {
                   <View key={item.id} style={styles.downloadItem}>
                     <View style={styles.downloadRow}>
                       {item.thumbnailUri ? (
-                        <Image
-                          source={{ uri: item.thumbnailUri }}
+                        <Image 
+                          source={{ uri: item.thumbnailUri }} 
                           style={styles.thumbnail}
                           resizeMode="cover"
                         />
                       ) : (
                         <View style={styles.fileIconContainer}>
-                          <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#6366f1" />
+                          <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#10b981" />
                         </View>
                       )}
                       <View style={styles.downloadInfo}>
@@ -2205,44 +2253,50 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1
   },
-  swipeIndicator: {
+  // MEJORA: Indicador lateral derecho - pleca sutil
+  sideIndicator: {
     position: 'absolute',
-    bottom: 20,
-    alignSelf: 'center',
+    right: 0,
+    top: '50%',
+    transform: [{ translateY: -30 }],
     zIndex: 100,
   },
-  indicatorPill: {
-    flexDirection: 'row',
+  indicatorTab: {
+    flexDirection: 'column',
     alignItems: 'center',
-    backgroundColor: 'rgba(30, 41, 59, 0.95)',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 24,
+    justifyContent: 'center',
+    backgroundColor: 'rgba(30, 41, 59, 0.85)',
+    paddingVertical: 12,
+    paddingHorizontal: 6,
+    borderTopLeftRadius: 12,
+    borderBottomLeftRadius: 12,
     elevation: 4,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
+    shadowOffset: { width: -2, height: 0 },
     shadowOpacity: 0.3,
     shadowRadius: 4,
   },
   indicatorBadge: {
     backgroundColor: '#ef4444',
-    borderRadius: 10,
-    minWidth: 18,
-    height: 18,
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
     justifyContent: 'center',
     alignItems: 'center',
-    marginLeft: 8,
+    marginTop: 6,
     paddingHorizontal: 4,
   },
   indicatorBadgeText: {
     color: '#fff',
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: 'bold',
   },
-  fabContainer: {
+  // MEJORA: FAB lateral derecho centrado
+  fabContainerRight: {
     position: 'absolute',
-    bottom: 20,
-    alignSelf: 'center',
+    right: 16,
+    top: '50%',
+    transform: [{ translateY: -28 }],
     zIndex: 101,
   },
   fab: {
@@ -2263,10 +2317,12 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)',
     zIndex: 102,
   },
-  menu: {
+  // MEJORA: Menú lateral derecho
+  menuRight: {
     position: 'absolute',
-    bottom: 90,
-    alignSelf: 'center',
+    right: 16,
+    top: '50%',
+    transform: [{ translateY: -120 }],
     backgroundColor: '#1e293b',
     borderRadius: 16,
     paddingVertical: 8,
