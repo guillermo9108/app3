@@ -1999,8 +1999,6 @@ export default function WebViewScreen() {
                     </View>
                     <View style={styles.downloadActions}>
                       <TouchableOpacity style={styles.actionButton} onPress={() => resumeDownload(item)}>
-
-                      <TouchableOpacity style={styles.actionButton} onPress={() => resumeDownload(item)}>
                         <Ionicons name="play" size={20} color="#10b981" />
                         <Text style={[styles.actionText, { color: '#10b981' }]}>Reanudar</Text>
                       </TouchableOpacity>
