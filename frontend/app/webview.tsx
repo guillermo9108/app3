@@ -27,10 +27,30 @@ import { Ionicons } from '@expo/vector-icons';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as MediaLibrary from 'expo-media-library';
 import * as VideoThumbnails from 'expo-video-thumbnails';
+import * as BackgroundFetch from 'expo-background-fetch';
+import * as TaskManager from 'expo-task-manager';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 const DOWNLOAD_EXTENSIONS = /\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|apk|exe|dmg|iso)/i;
+
+// Nombre de la tarea de background
+const BACKGROUND_NOTIFICATION_TASK = 'background-notification-check';
+
+// Definir la tarea de background para verificar notificaciones
+TaskManager.defineTask(BACKGROUND_NOTIFICATION_TASK, async () => {
+  try {
+    console.log('[StreamPay] Background fetch ejecutado');
+    // Aquí puedes hacer fetch a tu servidor para verificar notificaciones
+    // const response = await fetch('TU_SERVIDOR/api/notifications');
+    // const data = await response.json();
+    // if (data.hasNotifications) { mostrar notificación local }
+    return BackgroundFetch.BackgroundFetchResult.NewData;
+  } catch (error) {
+    console.error('[StreamPay] Error en background fetch:', error);
+    return BackgroundFetch.BackgroundFetchResult.Failed;
+  }
+});
 
 // Configurar canales de notificaciones para Android
 if (Platform.OS === 'android') {
@@ -198,6 +218,11 @@ const isAudioFile = (filename: string): boolean => {
   return ['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'wma'].includes(ext);
 };
 
+// Función para generar ID único sin btoa (compatible con Hermes)
+const generateUniqueId = (url: string): string => {
+  return url.replace(/[^a-zA-Z0-9]/g, '').substring(0, 30);
+};
+
 export default function WebViewScreen() {
   const webViewRef = useRef<WebView>(null);
   const router = useRouter();
@@ -220,11 +245,8 @@ export default function WebViewScreen() {
 
   const [currentMedia, setCurrentMedia] = useState<MediaInfo | null>(null);
   const [isInBackground, setIsInBackground] = useState(false);
-  
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistoryItem[]>([]);
   const [showPlaybackHistory, setShowPlaybackHistory] = useState(false);
-
-  // MEJORA: Guardar la orientación del video actual para mantenerla durante fullscreen
   const [currentVideoOrientation, setCurrentVideoOrientation] = useState<'portrait' | 'landscape'>('portrait');
 
   const isVideoPlayingRef = useRef(false);
@@ -238,43 +260,100 @@ export default function WebViewScreen() {
   const downloadQueueRef = useRef<DownloadItem[]>([]);
   const isDownloadingRef = useRef(false);
   const isFullscreenRef = useRef(false);
-
   const speedHistoryRef = useRef<Map<string, number[]>>(new Map());
   const lastUpdateTimeRef = useRef<Map<string, number>>(new Map());
 
-  // MEJORA: Animación para FAB lateral derecho
   const fabPosition = useRef(new Animated.Value(60)).current;
   const fabOpacity = useRef(new Animated.Value(0)).current;
 
-  useEffect(() => {
-    activeDownloadsRef.current = activeDownloads;
-  }, [activeDownloads]);
-
-  useEffect(() => {
-    downloadQueueRef.current = downloadQueue;
-  }, [downloadQueue]);
-
+  // Sincronizar refs con estado
+  useEffect(() => { activeDownloadsRef.current = activeDownloads; }, [activeDownloads]);
+  useEffect(() => { downloadQueueRef.current = downloadQueue; }, [downloadQueue]);
   useEffect(() => { showMenuRef.current = showMenu; }, [showMenu]);
   useEffect(() => { showDownloadsRef.current = showDownloads; }, [showDownloads]);
   useEffect(() => { showPlaybackHistoryRef.current = showPlaybackHistory; }, [showPlaybackHistory]);
   useEffect(() => { canGoBackRef.current = canGoBack; }, [canGoBack]);
   useEffect(() => { isFullscreenRef.current = isFullscreen; }, [isFullscreen]);
 
+  // Auto-guardar cola de descargas cuando cambia
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', handleAppStateChange);
-    return () => {
-      subscription.remove();
-    };
-  }, [currentMedia]);
+    if (permissionsChecked && downloadQueue.length >= 0) {
+      saveDownloadQueueToStorage(downloadQueue);
+    }
+  }, [downloadQueue, permissionsChecked]);
 
-  const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+  // Auto-guardar historial de reproducción cuando cambia
+  useEffect(() => {
+    if (permissionsChecked && playbackHistory.length >= 0) {
+      savePlaybackHistoryToStorage(playbackHistory);
+    }
+  }, [playbackHistory, permissionsChecked]);
+
+  // Registrar Background Fetch
+  const registerBackgroundFetch = async () => {
+    try {
+      const status = await BackgroundFetch.getStatusAsync();
+      if (status === BackgroundFetch.BackgroundFetchStatus.Available) {
+        await BackgroundFetch.registerTaskAsync(BACKGROUND_NOTIFICATION_TASK, {
+          minimumInterval: 15 * 60, // 15 minutos mínimo
+          stopOnTerminate: false,
+          startOnBoot: true,
+        });
+        console.log('[StreamPay] Background fetch registrado');
+      }
+    } catch (error) {
+      console.error('[StreamPay] Error registrando background fetch:', error);
+    }
+  };
+
+  // Verificar notificaciones pendientes al volver de segundo plano
+  const checkPendingNotifications = useCallback(() => {
+    webViewRef.current?.injectJavaScript(`
+      (function() {
+        // Verificar si hay notificaciones pendientes del Service Worker
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+          navigator.serviceWorker.controller.postMessage({ type: 'CHECK_NOTIFICATIONS' });
+        }
+        
+        // Verificar notificaciones del sitio si tiene API expuesta
+        if (window.__checkNotifications) {
+          window.__checkNotifications();
+        }
+        
+        // Buscar elementos de notificación en la página
+        const notificationElements = document.querySelectorAll(
+          '[data-notification-count], .notification-badge, .unread-count, .badge-count'
+        );
+        notificationElements.forEach(el => {
+          const count = el.textContent || el.innerText;
+          if (count && parseInt(count) > 0) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'notificationCount',
+              count: count
+            }));
+          }
+        });
+      })();
+      true;
+    `);
+  }, []);
+
+  // Manejador de cambio de estado de la app
+  const handleAppStateChange = useCallback(async (nextAppState: AppStateStatus) => {
     if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
       console.log('[StreamPay] App en primer plano');
       setIsInBackground(false);
       await Notifications.dismissNotificationAsync('audio-playback');
+      
+      // Verificar notificaciones pendientes al volver
+      setTimeout(() => {
+        checkPendingNotifications();
+      }, 1000);
+      
     } else if (nextAppState.match(/inactive|background/)) {
       console.log('[StreamPay] App en segundo plano');
       setIsInBackground(true);
+      
       if (currentMedia?.isPlaying && currentMedia?.isAudio) {
         await showAudioNotificationControls();
       }
@@ -283,7 +362,14 @@ export default function WebViewScreen() {
       }
     }
     appStateRef.current = nextAppState;
-  };
+  }, [currentMedia, checkPendingNotifications]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => {
+      subscription.remove();
+    };
+  }, [handleAppStateChange]);
 
   const showAudioNotificationControls = async () => {
     if (!permissions.notifications || !currentMedia) return;
@@ -383,7 +469,7 @@ export default function WebViewScreen() {
     }
   };
 
-  // MEJORA: FAB lateral derecho - mostrar
+  // Funciones de animación del FAB
   const showFabButton = useCallback(() => {
     setShowFab(true);
     Animated.parallel([
@@ -392,7 +478,6 @@ export default function WebViewScreen() {
     ]).start();
   }, [fabPosition, fabOpacity]);
 
-  // MEJORA: FAB lateral derecho - ocultar
   const hideFabButton = useCallback(() => {
     Animated.parallel([
       Animated.spring(fabPosition, { toValue: 60, useNativeDriver: true, tension: 50, friction: 7 }),
@@ -411,22 +496,19 @@ export default function WebViewScreen() {
     }
   }, [showFab, showFabButton, hideFabButton]);
 
-  // MEJORA: Rotación de video - mantener landscape para videos horizontales
+  // Manejo de fullscreen de video
   const handleVideoFullscreen = useCallback(async (videoWidth: number, videoHeight: number, enterFullscreen: boolean) => {
     if (enterFullscreen) {
       const isLandscapeVideo = videoWidth > videoHeight;
       setIsFullscreen(true);
       setCurrentVideoOrientation(isLandscapeVideo ? 'landscape' : 'portrait');
-      
-      // MEJORA: Bloquear la orientación correcta según el video
+
       if (isLandscapeVideo) {
-        // Para videos horizontales, forzar y bloquear en landscape
         await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
       } else {
-        // Para videos verticales, mantener portrait
         await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
       }
-      
+
       webViewRef.current?.injectJavaScript(`
         (function() {
           const video = document.querySelector('video');
@@ -439,7 +521,6 @@ export default function WebViewScreen() {
             video.style.zIndex = '999999';
             video.style.backgroundColor = 'black';
             video.style.objectFit = 'contain';
-            
             const downloadButtons = document.querySelectorAll('[download], [data-download], .download-btn, .download-button');
             downloadButtons.forEach(btn => btn.style.display = 'none');
           }
@@ -449,9 +530,8 @@ export default function WebViewScreen() {
     } else {
       setIsFullscreen(false);
       setCurrentVideoOrientation('portrait');
-      // MEJORA: Al salir de fullscreen, volver a portrait
       await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
-      
+
       webViewRef.current?.injectJavaScript(`
         (function() {
           const video = document.querySelector('video');
@@ -474,15 +554,15 @@ export default function WebViewScreen() {
     setIsFullscreen(false);
     setCurrentVideoOrientation('portrait');
     await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
-    
+
     webViewRef.current?.injectJavaScript(`
       try {
         if (document.fullscreenElement) document.exitFullscreen();
         const v = document.querySelector('video');
-        if (v) { 
-          v.style.position = ''; 
-          v.style.width = ''; 
-          v.style.height = ''; 
+        if (v) {
+          v.style.position = '';
+          v.style.width = '';
+          v.style.height = '';
           v.style.top = '';
           v.style.left = '';
           v.style.zIndex = '';
@@ -492,52 +572,35 @@ export default function WebViewScreen() {
     `);
   };
 
-  // MEJORA: handleBackPress - SIEMPRE consumir el evento, nunca cerrar la app
+  // CORREGIDO: handleBackPress con confirmación de salida
   const handleBackPress = useCallback(() => {
-    // Cerrar panel de historial de reproducción y volver a la web
     if (showPlaybackHistoryRef.current) {
       setShowPlaybackHistory(false);
-      // MEJORA: Al cerrar "Continuar viendo", también navegar atrás en la web si es posible
-
-      if (canGoBackRef.current && webViewRef.current) {
-        webViewRef.current.goBack();
-      }
+      return true;
+    }
+    if (showDownloadsRef.current) {
+      setShowDownloads(false);
+      return true;
+    }
+    if (showMenuRef.current) {
+      setShowMenu(false);
+      hideFabButton();
+      return true;
+    }
+    if (isFullscreenRef.current) {
+      exitFullscreen();
+      return true;
+    }
+    if (showFab) {
+      hideFabButton();
+      return true;
+    }
+    if (canGoBackRef.current && webViewRef.current) {
+      webViewRef.current.goBack();
       return true;
     }
     
-    // Cerrar panel de descargas
-    if (showDownloadsRef.current) { 
-      setShowDownloads(false); 
-      return true; 
-    }
-    
-    // Cerrar menú y FAB
-    if (showMenuRef.current) { 
-      setShowMenu(false);
-      hideFabButton();
-      return true; 
-    }
-    
-    // Salir de fullscreen
-    if (isFullscreenRef.current) { 
-      exitFullscreen(); 
-      return true; 
-    }
-    
-    // Ocultar FAB si está visible
-    if (showFab) { 
-      hideFabButton(); 
-      return true; 
-    }
-    
-    // Navegar atrás en el WebView
-    if (canGoBackRef.current && webViewRef.current) { 
-      webViewRef.current.goBack(); 
-      return true; 
-    }
-    
-    // MEJORA: Si no hay nada más que hacer, mostrar diálogo de confirmación para salir
-    // En lugar de dejar que el sistema cierre la app, siempre consumimos el evento
+    // Confirmar salida en lugar de cerrar directamente
     Alert.alert(
       'Salir de la aplicación',
       '¿Deseas salir de StreamPay?',
@@ -546,27 +609,22 @@ export default function WebViewScreen() {
         { text: 'Salir', style: 'destructive', onPress: () => BackHandler.exitApp() }
       ]
     );
-    return true; // SIEMPRE retornar true para evitar que la app se cierre/minimice
+    return true; // Siempre retornar true para evitar cierre inesperado
   }, [showFab, hideFabButton]);
 
+  // useEffect principal con listener de notificaciones integrado
   useEffect(() => {
     loadServerUrl();
     loadDownloadHistory();
     loadDownloadQueue();
     loadPlaybackHistory();
     initializePermissions();
-    
-    const backHandler = BackHandler.addEventListener('hardwareBackPress', handleBackPress);
-    setupWebNotificationListener();
-    
-    return () => {
-      backHandler.remove();
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT).catch(() => {});
-    };
-  }, [handleBackPress]);
+    registerBackgroundFetch();
 
-  const setupWebNotificationListener = async () => {
-    const subscription = Notifications.addNotificationResponseReceivedListener(response => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', handleBackPress);
+    
+    // Listener de notificaciones integrado directamente (CORREGIDO: fuga de memoria)
+    const notificationSubscription = Notifications.addNotificationResponseReceivedListener(response => {
       const data = response.notification.request.content.data;
       if (data?.type === 'web-notification' && data?.url) {
         webViewRef.current?.injectJavaScript(`
@@ -575,8 +633,13 @@ export default function WebViewScreen() {
         `);
       }
     });
-    return () => subscription.remove();
-  };
+
+    return () => {
+      backHandler.remove();
+      notificationSubscription.remove();
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT).catch(() => {});
+    };
+  }, [handleBackPress]);
 
   const showWebNotification = async (notification: WebNotification) => {
     if (!permissions.notifications) return;
@@ -585,8 +648,8 @@ export default function WebViewScreen() {
       const content: any = {
         title: notification.title,
         body: notification.body,
-        data: { 
-          type: 'web-notification', 
+        data: {
+          type: 'web-notification',
           id: notification.id,
           tag: notification.tag,
         },
@@ -607,6 +670,7 @@ export default function WebViewScreen() {
     }
   };
 
+  // Funciones de carga y guardado
   const loadServerUrl = async () => {
     try {
       const url = await AsyncStorage.getItem('SERVER_URL');
@@ -616,6 +680,7 @@ export default function WebViewScreen() {
       router.replace('/config');
     }
   };
+
   const loadDownloadHistory = async () => {
     try {
       const history = await AsyncStorage.getItem('DOWNLOAD_HISTORY');
@@ -648,7 +713,7 @@ export default function WebViewScreen() {
     }
   };
 
-  const saveDownloadQueue = async (queue: DownloadItem[]) => {
+  const saveDownloadQueueToStorage = async (queue: DownloadItem[]) => {
     try {
       await AsyncStorage.setItem('DOWNLOAD_QUEUE', JSON.stringify(queue));
     } catch (error) {
@@ -665,7 +730,7 @@ export default function WebViewScreen() {
     }
   };
 
-  const savePlaybackHistory = async (history: PlaybackHistoryItem[]) => {
+  const savePlaybackHistoryToStorage = async (history: PlaybackHistoryItem[]) => {
     try {
       await AsyncStorage.setItem('PLAYBACK_HISTORY', JSON.stringify(history.slice(0, 50)));
     } catch (error) {
@@ -673,16 +738,17 @@ export default function WebViewScreen() {
     }
   };
 
+  // CORREGIDO: updatePlaybackPosition sin btoa
   const updatePlaybackPosition = (url: string, title: string, currentTime: number, duration: number, thumbnail?: string) => {
     if (!url || duration <= 0 || currentTime < 5) return;
-    
+
     const progress = Math.round((currentTime / duration) * 100);
     const completed = progress >= 95;
-    const id = btoa(url).replace(/[^a-zA-Z0-9]/g, '').substring(0, 20);
-    
+    const id = generateUniqueId(url); // Usa la función corregida sin btoa
+
     setPlaybackHistory(prev => {
       const existingIndex = prev.findIndex(item => item.id === id);
-      
+
       const newItem: PlaybackHistoryItem = {
         id,
         url,
@@ -694,27 +760,24 @@ export default function WebViewScreen() {
         lastPlayed: new Date(),
         completed,
       };
-      
+
       let newHistory: PlaybackHistoryItem[];
       if (existingIndex >= 0) {
         newHistory = [newItem, ...prev.filter((_, i) => i !== existingIndex)];
       } else {
         newHistory = [newItem, ...prev];
       }
-      
-      newHistory = newHistory.slice(0, 50);
-      savePlaybackHistory(newHistory);
-      return newHistory;
+
+      return newHistory.slice(0, 50);
     });
   };
 
   const resumeFromHistory = (item: PlaybackHistoryItem) => {
     setShowPlaybackHistory(false);
-    
+
     webViewRef.current?.injectJavaScript(`
       (function() {
         window.location.href = '${item.url}';
-        
         const checkVideo = setInterval(() => {
           const video = document.querySelector('video');
           if (video && video.readyState >= 2) {
@@ -722,7 +785,6 @@ export default function WebViewScreen() {
             clearInterval(checkVideo);
           }
         }, 500);
-        
         setTimeout(() => clearInterval(checkVideo), 10000);
       })();
       true;
@@ -730,11 +792,7 @@ export default function WebViewScreen() {
   };
 
   const deletePlaybackItem = (id: string) => {
-    setPlaybackHistory(prev => {
-      const newHistory = prev.filter(item => item.id !== id);
-      savePlaybackHistory(newHistory);
-      return newHistory;
-    });
+    setPlaybackHistory(prev => prev.filter(item => item.id !== id));
   };
 
   const clearPlaybackHistory = () => {
@@ -746,21 +804,18 @@ export default function WebViewScreen() {
         {
           text: 'Limpiar',
           style: 'destructive',
-          onPress: () => {
-            setPlaybackHistory([]);
-            savePlaybackHistory([]);
-          }
+          onPress: () => setPlaybackHistory([])
         }
       ]
     );
   };
 
+  // Funciones de formato
   const formatDuration = (seconds: number): string => {
     if (!seconds || seconds <= 0) return '0:00';
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
     const secs = Math.floor(seconds % 60);
-    
     if (hrs > 0) {
       return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
@@ -773,7 +828,6 @@ export default function WebViewScreen() {
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);
     const days = Math.floor(diff / 86400000);
-    
     if (minutes < 1) return 'Ahora';
     if (minutes < 60) return `Hace ${minutes}m`;
     if (hours < 24) return `Hace ${hours}h`;
@@ -785,17 +839,13 @@ export default function WebViewScreen() {
     try {
       const urlObj = new URL(url);
       const filenameParam = urlObj.searchParams.get('filename') ||
-                           urlObj.searchParams.get('file') ||
-                           urlObj.searchParams.get('name') ||
-                           urlObj.searchParams.get('title');
-      if (filenameParam) {
-        return decodeURIComponent(filenameParam);
-      }
+        urlObj.searchParams.get('file') ||
+        urlObj.searchParams.get('name') ||
+        urlObj.searchParams.get('title');
+      if (filenameParam) return decodeURIComponent(filenameParam);
       const pathParts = urlObj.pathname.split('/').filter(p => p.length > 0);
       const lastPart = pathParts[pathParts.length - 1];
-      if (lastPart && lastPart.includes('.')) {
-        return decodeURIComponent(lastPart);
-      }
+      if (lastPart && lastPart.includes('.')) return decodeURIComponent(lastPart);
       return `descarga_${fallbackId}.mp4`;
     } catch (error) {
       return `descarga_${fallbackId}.mp4`;
@@ -804,15 +854,12 @@ export default function WebViewScreen() {
 
   const sanitizeFilename = (filename: string): string => {
     let clean = filename.replace(/[<>:"/\\|?*]/g, '_').replace(/[-\x1F]/g, '');
-    clean = clean.replace(/_+/g, '_');
-    clean = clean.replace(/^_+|_+$/g, '');
+    clean = clean.replace(/_+/g, '_').replace(/^_+|_+$/g, '');
     if (clean.length > 200) {
       const ext = clean.match(/\.[^.]+$/)?.[0] || '';
       clean = clean.substring(0, 200 - ext.length) + ext;
     }
-    if (!/\.[a-z0-9]+$/i.test(clean)) {
-      clean += '.mp4';
-    }
+    if (!/\.[a-z0-9]+$/i.test(clean)) clean += '.mp4';
     return clean || 'descarga.mp4';
   };
 
@@ -824,9 +871,7 @@ export default function WebViewScreen() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
-  const formatSpeed = (bytesPerSecond: number): string => {
-    return formatBytes(bytesPerSecond) + '/s';
-  };
+  const formatSpeed = (bytesPerSecond: number): string => formatBytes(bytesPerSecond) + '/s';
 
   const calculateSmoothedSpeed = (downloadId: string, currentSpeed: number): number => {
     const alpha = 0.3;
@@ -942,30 +987,28 @@ export default function WebViewScreen() {
 
   const processDownloadQueue = async (queue?: DownloadItem[]) => {
     const currentQueue = queue || downloadQueueRef.current;
-    
     if (isDownloadingRef.current || currentQueue.length === 0) return;
-    
     const nextDownload = currentQueue.find(d => d.status === 'queued');
     if (!nextDownload) return;
-    
+
     isDownloadingRef.current = true;
-    
-    setDownloadQueue(prev => prev.map(d => 
+
+    setDownloadQueue(prev => prev.map(d =>
       d.id === nextDownload.id ? { ...d, status: 'downloading' } : d
     ));
     setActiveDownloads(prev => [...prev, { ...nextDownload, status: 'downloading' }]);
-    
+
     await executeDownload(nextDownload);
   };
 
   const executeDownload = async (item: DownloadItem) => {
     const { id: downloadId, url, filename, downloadedBytes: resumeFromBytes } = item;
-    
+
     speedHistoryRef.current.set(downloadId, []);
     lastUpdateTimeRef.current.set(downloadId, Date.now());
-    
+
     await updateDownloadNotification(downloadId, filename, 0, 'Iniciando...', '');
-    
+
     let lastBytes = resumeFromBytes || 0;
     let lastTime = Date.now();
     let lastNotificationUpdate = 0;
@@ -976,18 +1019,18 @@ export default function WebViewScreen() {
 
     try {
       const downloadPath = `${FileSystem.documentDirectory}${filename}`;
-      
+
       let headers: any = {
         'Accept': '*/*',
         'Accept-Encoding': 'identity',
         'Connection': 'keep-alive',
       };
-      
+
       if (resumeFromBytes && resumeFromBytes > 0) {
         headers['Range'] = `bytes=${resumeFromBytes}-`;
         console.log('[StreamPay] Reanudando descarga desde byte:', resumeFromBytes);
       }
-      
+
       const downloadResumable = FileSystem.createDownloadResumable(
         url,
         downloadPath,
@@ -996,58 +1039,58 @@ export default function WebViewScreen() {
           const { totalBytesWritten, totalBytesExpectedToWrite } = downloadProgress;
           const actualBytesWritten = totalBytesWritten + (resumeFromBytes || 0);
           const actualTotalBytes = totalBytesExpectedToWrite + (resumeFromBytes || 0);
-          
+
           let progress = 0;
           if (actualTotalBytes > 0) {
             progress = (actualBytesWritten / actualTotalBytes) * 100;
           }
-          
+
           const now = Date.now();
           const timeDiff = (now - lastTime) / 1000;
-          
+
           let speed = lastKnownSpeed;
           let smoothedSpeed = lastSmoothedSpeed;
           let timeRemaining = lastTimeRemaining;
-          
+
           if (timeDiff >= 0.5 && actualBytesWritten > lastBytes) {
             const bytesDiff = actualBytesWritten - lastBytes;
             const rawSpeed = bytesDiff / timeDiff;
-            
+
             smoothedSpeed = calculateSmoothedSpeed(downloadId, rawSpeed);
             speed = formatSpeed(smoothedSpeed);
-            
+
             lastKnownSpeed = speed;
             lastSmoothedSpeed = smoothedSpeed;
-            
+
             if (actualTotalBytes > 0 && smoothedSpeed > 0) {
               const bytesRemaining = actualTotalBytes - actualBytesWritten;
               timeRemaining = formatTimeRemaining(bytesRemaining, smoothedSpeed);
               lastTimeRemaining = timeRemaining;
             }
-            
+
             lastBytes = actualBytesWritten;
             lastTime = now;
           }
 
           if (now - lastUIUpdate >= 300) {
             lastUIUpdate = now;
-            
-            setActiveDownloads(prev => prev.map(d => 
-              d.id === downloadId 
-                ? { 
-                    ...d, 
+
+            setActiveDownloads(prev => prev.map(d =>
+              d.id === downloadId
+                ? {
+                    ...d,
                     progress: Math.min(progress, 99.9),
                     speed,
                     downloadedBytes: actualBytesWritten,
                     totalSize: actualTotalBytes,
-                    size: actualTotalBytes > 0 
+                    size: actualTotalBytes > 0
                       ? `${formatBytes(actualBytesWritten)} / ${formatBytes(actualTotalBytes)}`
                       : formatBytes(actualBytesWritten),
                     duration: timeRemaining,
-                  } 
+                  }
                 : d
             ));
-            
+
             setDownloadQueue(prev => prev.map(d =>
               d.id === downloadId
                 ? { ...d, downloadedBytes: actualBytesWritten, totalSize: actualTotalBytes }
@@ -1072,7 +1115,7 @@ export default function WebViewScreen() {
       if (result && result.uri) {
         const fileInfo = await FileSystem.getInfoAsync(result.uri);
         const fileSize = fileInfo.exists ? (fileInfo as any).size || 0 : 0;
-        
+
         let thumbnailUri: string | null = null;
         if (isVideoFile(filename)) {
           thumbnailUri = await generateThumbnail(result.uri, filename);
@@ -1092,11 +1135,7 @@ export default function WebViewScreen() {
         };
 
         setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-        setDownloadQueue(prev => {
-          const newQueue = prev.filter(d => d.id !== downloadId);
-          saveDownloadQueue(newQueue);
-          return newQueue;
-        });
+        setDownloadQueue(prev => prev.filter(d => d.id !== downloadId));
         setDownloadHistory(prev => {
           const newHistory = [completedDownload, ...prev.filter(d => d.id !== downloadId)].slice(0, 100);
           saveDownloadHistory(newHistory);
@@ -1105,18 +1144,17 @@ export default function WebViewScreen() {
 
         await updateDownloadNotification(downloadId, filename, 100, '', '', true);
         await Notifications.dismissNotificationAsync('background-download');
-        
+
         console.log('[StreamPay] Descarga completada:', { filename, size: formatBytes(fileSize) });
       }
     } catch (error: any) {
       console.error('[StreamPay] Error en descarga:', error);
       downloadResumablesRef.current.delete(downloadId);
-      
+
       setDownloadQueue(prev => prev.map(d =>
         d.id === downloadId ? { ...d, status: 'paused', error: error?.message } : d
       ));
-      saveDownloadQueue(downloadQueueRef.current);
-      
+
       setActiveDownloads(prev => prev.map(d =>
         d.id === downloadId ? { ...d, status: 'failed', error: error?.message } : d
       ));
@@ -1131,7 +1169,7 @@ export default function WebViewScreen() {
   const handleMessage = async (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      
+
       if (data.type === 'fullscreenchange') {
         if (data.isFullscreen && data.videoWidth && data.videoHeight) {
           handleVideoFullscreen(data.videoWidth, data.videoHeight, true);
@@ -1139,7 +1177,7 @@ export default function WebViewScreen() {
           handleVideoFullscreen(0, 0, false);
         }
       }
-      
+
       if (data.type === 'videoState') {
         isVideoPlayingRef.current = data.isPlaying;
         setCurrentMedia({
@@ -1155,36 +1193,24 @@ export default function WebViewScreen() {
           videoHeight: data.videoHeight,
           isLandscape: data.videoWidth > data.videoHeight,
         });
-        
+
         if (data.isVideo && data.url && data.currentTime && data.duration) {
-          updatePlaybackPosition(
-            data.url,
-            data.title || 'Video',
-            data.currentTime,
-            data.duration,
-            data.thumbnail
-          );
+          updatePlaybackPosition(data.url, data.title || 'Video', data.currentTime, data.duration, data.thumbnail);
         }
-        
+
         if (data.isAudio && data.isPlaying && isInBackground) {
           await showAudioNotificationControls();
         }
       }
-      
+
       if (data.type === 'videoProgress') {
-        updatePlaybackPosition(
-          data.url,
-          data.title || 'Video',
-          data.currentTime,
-          data.duration,
-          data.thumbnail
-        );
+        updatePlaybackPosition(data.url, data.title || 'Video', data.currentTime, data.duration, data.thumbnail);
       }
-      
+
       if (data.type === 'download') {
         handleDownload(data.url, data.filename || '');
       }
-      
+
       if (data.type === 'webNotification') {
         await showWebNotification({
           id: data.id || Date.now().toString(),
@@ -1196,14 +1222,18 @@ export default function WebViewScreen() {
           timestamp: Date.now(),
         });
       }
+
+      if (data.type === 'notificationCount') {
+        console.log('[StreamPay] Notificaciones pendientes:', data.count);
+      }
     } catch (error) {
       console.error('[StreamPay] Error mensaje:', error);
     }
   };
-  
+
   const handleDownload = async (url: string, suggestedFilename: string = '') => {
     const downloadId = Date.now().toString();
-    
+
     if (!permissions.mediaLibrary) {
       const newStatus = await requestAllPermissions();
       if (!newStatus.mediaLibrary) {
@@ -1218,10 +1248,10 @@ export default function WebViewScreen() {
         return;
       }
     }
-    
+
     let filename = suggestedFilename || extractFilenameFromUrl(url, downloadId);
     filename = sanitizeFilename(filename);
-    
+
     console.log('[StreamPay] Agregando a cola:', { url: url.substring(0, 100), filename });
 
     const newDownload: DownloadItem = {
@@ -1235,38 +1265,27 @@ export default function WebViewScreen() {
       totalSize: 0,
     };
 
-    setDownloadQueue(prev => {
-      const newQueue = [...prev, newDownload];
-      saveDownloadQueue(newQueue);
-      return newQueue;
-    });
-    
+    setDownloadQueue(prev => [...prev, newDownload]);
     setShowDownloads(true);
-    
+
     if (!isDownloadingRef.current) {
       setTimeout(() => processDownloadQueue(), 100);
     }
   };
-  
+
   const cancelDownload = async (downloadId: string) => {
     const resumable = downloadResumablesRef.current.get(downloadId);
     if (resumable) {
-      try {
-        await resumable.pauseAsync();
-      } catch (e) {}
+      try { await resumable.pauseAsync(); } catch (e) {}
       downloadResumablesRef.current.delete(downloadId);
     }
     speedHistoryRef.current.delete(downloadId);
     lastUpdateTimeRef.current.delete(downloadId);
     await Notifications.dismissNotificationAsync(`download-${downloadId}`);
-    
+
     setActiveDownloads(prev => prev.filter(d => d.id !== downloadId));
-    setDownloadQueue(prev => {
-      const newQueue = prev.filter(d => d.id !== downloadId);
-      saveDownloadQueue(newQueue);
-      return newQueue;
-    });
-    
+    setDownloadQueue(prev => prev.filter(d => d.id !== downloadId));
+
     isDownloadingRef.current = false;
     setTimeout(() => processDownloadQueue(), 100);
   };
@@ -1274,11 +1293,9 @@ export default function WebViewScreen() {
   const resumeDownload = async (item: DownloadItem) => {
     setDownloadQueue(prev => {
       const filtered = prev.filter(d => d.id !== item.id);
-      const newQueue = [{ ...item, status: 'queued' as const }, ...filtered];
-      saveDownloadQueue(newQueue);
-      return newQueue;
+      return [{ ...item, status: 'queued' as const }, ...filtered];
     });
-    
+
     if (!isDownloadingRef.current) {
       setTimeout(() => processDownloadQueue(), 100);
     }
@@ -1350,8 +1367,8 @@ export default function WebViewScreen() {
                   text: 'Buscar app',
                   onPress: () => {
                     const searchTerm = mimeType.includes('video') ? 'video player' :
-                                      mimeType.includes('audio') ? 'music player' :
-                                      mimeType.includes('pdf') ? 'pdf reader' : 'file manager';
+                      mimeType.includes('audio') ? 'music player' :
+                      mimeType.includes('pdf') ? 'pdf reader' : 'file manager';
                     Linking.openURL(`market://search?q=${searchTerm}`);
                   }
                 }
@@ -1412,7 +1429,6 @@ export default function WebViewScreen() {
                 }
               } catch (e) {}
             }
-            
             if (item.thumbnailUri) {
               try {
                 const thumbInfo = await FileSystem.getInfoAsync(item.thumbnailUri);
@@ -1421,7 +1437,6 @@ export default function WebViewScreen() {
                 }
               } catch (e) {}
             }
-            
             const newHistory = downloadHistory.filter(d => d.id !== item.id);
             setDownloadHistory(newHistory);
             saveDownloadHistory(newHistory);
@@ -1467,13 +1482,13 @@ export default function WebViewScreen() {
     (function() {
       if (window.__streamPayInjected) return;
       window.__streamPayInjected = true;
-      
+
       const notify = (type, payload) => {
         try {
           window.ReactNativeWebView.postMessage(JSON.stringify({ type, ...payload }));
         } catch(e) {}
       };
-      
+
       document.addEventListener('click', function(e) {
         const a = e.target.closest('a');
         if (a && a.href) {
@@ -1491,7 +1506,7 @@ export default function WebViewScreen() {
           }
         }
       }, true);
-      
+
       const hideDownloadButtons = () => {
         const selectors = [
           'video::-internal-media-controls-download-button',
@@ -1502,25 +1517,22 @@ export default function WebViewScreen() {
           '.vjs-download-button',
           '.plyr__control[data-plyr="download"]'
         ];
-        
         const style = document.createElement('style');
-        style.textContent = selectors.map(s => s + '{ display: none !important; }').join('\\n');
+        style.textContent = selectors.map(s => s + '{ display: none !important; }').join(' ');
         document.head.appendChild(style);
-        
         document.querySelectorAll('video').forEach(v => {
           v.controlsList = 'nodownload';
         });
       };
       hideDownloadButtons();
-      
+
       const checkVideos = () => {
         document.querySelectorAll('video').forEach(v => {
           if (!v.hasAttribute('data-sp-observed')) {
             v.setAttribute('data-sp-observed', '1');
             v.controlsList = 'nodownload';
-            
+
             const getVideoUrl = () => v.src || v.currentSrc || window.location.href;
-            
             const getThumbnail = () => {
               const poster = v.poster;
               if (poster) return poster;
@@ -1528,10 +1540,10 @@ export default function WebViewScreen() {
               const img = parent?.querySelector('img');
               return img?.src || '';
             };
-            
+
             v.addEventListener('play', () => {
-              notify('videoState', { 
-                isPlaying: true, 
+              notify('videoState', {
+                isPlaying: true,
                 isVideo: true,
                 url: getVideoUrl(),
                 videoWidth: v.videoWidth,
@@ -1542,7 +1554,7 @@ export default function WebViewScreen() {
                 thumbnail: getThumbnail()
               });
             });
-            
+
             v.addEventListener('pause', () => {
               notify('videoProgress', {
                 url: getVideoUrl(),
@@ -1553,7 +1565,7 @@ export default function WebViewScreen() {
               });
               notify('videoState', { isPlaying: false, isVideo: true });
             });
-            
+
             v.addEventListener('ended', () => {
               notify('videoProgress', {
                 url: getVideoUrl(),
@@ -1564,12 +1576,11 @@ export default function WebViewScreen() {
               });
               notify('videoState', { isPlaying: false, isVideo: true });
             });
-            
+
             let lastSaveTime = 0;
             v.addEventListener('timeupdate', () => {
               if (v.paused) return;
               const now = Math.floor(v.currentTime);
-              
               if (now > 0 && now % 10 === 0 && now !== lastSaveTime) {
                 lastSaveTime = now;
                 notify('videoProgress', {
@@ -1581,7 +1592,7 @@ export default function WebViewScreen() {
                 });
               }
             });
-            
+
             v.addEventListener('seeked', () => {
               notify('videoProgress', {
                 url: getVideoUrl(),
@@ -1593,55 +1604,52 @@ export default function WebViewScreen() {
             });
           }
         });
-        
+
         document.querySelectorAll('audio').forEach(a => {
           if (!a.hasAttribute('data-sp-observed')) {
             a.setAttribute('data-sp-observed', '1');
-            
             a.addEventListener('play', () => {
-              notify('videoState', { 
-                isPlaying: true, 
+              notify('videoState', {
+                isPlaying: true,
                 isAudio: true,
                 title: document.title,
                 duration: a.duration,
                 currentTime: a.currentTime
               });
             });
-            
             a.addEventListener('pause', () => {
               notify('videoState', { isPlaying: false, isAudio: true });
             });
-            
             a.addEventListener('ended', () => {
               notify('videoState', { isPlaying: false, isAudio: true });
             });
           }
         });
       };
-      
+
       setInterval(checkVideos, 2000);
       checkVideos();
-      
+
       document.addEventListener('fullscreenchange', () => {
         const video = document.fullscreenElement?.querySelector('video') || document.fullscreenElement;
         const isFs = !!document.fullscreenElement;
-        notify('fullscreenchange', { 
+        notify('fullscreenchange', {
           isFullscreen: isFs,
           videoWidth: video?.videoWidth || 0,
           videoHeight: video?.videoHeight || 0
         });
       });
-      
+
       document.addEventListener('webkitfullscreenchange', () => {
         const video = document.webkitFullscreenElement?.querySelector('video') || document.webkitFullscreenElement;
         const isFs = !!document.webkitFullscreenElement;
-        notify('fullscreenchange', { 
+        notify('fullscreenchange', {
           isFullscreen: isFs,
           videoWidth: video?.videoWidth || 0,
           videoHeight: video?.videoHeight || 0
         });
       });
-      
+
       if ('Notification' in window) {
         const OriginalNotification = window.Notification;
         window.Notification = function(title, options = {}) {
@@ -1658,7 +1666,7 @@ export default function WebViewScreen() {
         window.Notification.permission = OriginalNotification.permission;
         window.Notification.requestPermission = OriginalNotification.requestPermission.bind(OriginalNotification);
       }
-      
+
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.addEventListener('message', (event) => {
           if (event.data && event.data.type === 'notification') {
@@ -1749,12 +1757,20 @@ export default function WebViewScreen() {
         allowFileAccessFromFileURLs={true}
         cacheEnabled={true}
         thirdPartyCookiesEnabled={true}
+        setSupportMultipleWindows={false}
+        androidLayerType="hardware"
+        sharedCookiesEnabled={true}
+        onRenderProcessGone={(syntheticEvent) => {
+          const { nativeEvent } = syntheticEvent;
+          console.warn('[StreamPay] WebView process crashed, reloading...');
+          webViewRef.current?.reload();
+        }}
       />
 
-      {/* MEJORA: Indicador lateral derecho - borde sutil tipo pleca "<" */}
+      {/* Indicador lateral derecho */}
       {!isFullscreen && !showFab && (
-        <TouchableOpacity 
-          style={styles.sideIndicator} 
+        <TouchableOpacity
+          style={styles.sideIndicator}
           onPress={handleIndicatorPress}
           activeOpacity={0.7}
         >
@@ -1770,20 +1786,20 @@ export default function WebViewScreen() {
           </View>
         </TouchableOpacity>
       )}
-      
-      {/* MEJORA: FAB lateral derecho centrado verticalmente */}
+
+      {/* FAB lateral derecho */}
       {!isFullscreen && showFab && (
-        <Animated.View 
+        <Animated.View
           style={[
-            styles.fabContainerRight, 
-            { 
+            styles.fabContainerRight,
+            {
               transform: [{ translateX: fabPosition }],
-              opacity: fabOpacity 
+              opacity: fabOpacity
             }
           ]}
         >
-          <TouchableOpacity 
-            style={styles.fab} 
+          <TouchableOpacity
+            style={styles.fab}
             onPress={() => {
               if (showMenu) {
                 setShowMenu(false);
@@ -1798,34 +1814,34 @@ export default function WebViewScreen() {
         </Animated.View>
       )}
 
-      {/* MEJORA: Menú lateral derecho */}
+      {/* Menú lateral derecho */}
       {showMenu && !isFullscreen && (
         <>
-          <TouchableOpacity 
-            style={styles.menuOverlay} 
-            onPress={() => { 
-              setShowMenu(false); 
+          <TouchableOpacity
+            style={styles.menuOverlay}
+            onPress={() => {
+              setShowMenu(false);
               hideFabButton();
-            }} 
+            }}
           />
           <View style={styles.menuRight}>
             <TouchableOpacity
               style={styles.menuItem}
-              onPress={() => { 
-                setShowMenu(false); 
+              onPress={() => {
+                setShowMenu(false);
                 hideFabButton();
-                webViewRef.current?.reload(); 
+                webViewRef.current?.reload();
               }}
             >
               <Ionicons name="refresh-outline" size={22} color="#e2e8f0" />
               <Text style={styles.menuText}>Recargar</Text>
             </TouchableOpacity>
-            
+
             <TouchableOpacity
               style={styles.menuItem}
-              onPress={() => { 
-                setShowMenu(false); 
-                setShowPlaybackHistory(true); 
+              onPress={() => {
+                setShowMenu(false);
+                setShowPlaybackHistory(true);
               }}
             >
               <Ionicons name="play-circle-outline" size={22} color="#e2e8f0" />
@@ -1838,12 +1854,12 @@ export default function WebViewScreen() {
                 </View>
               )}
             </TouchableOpacity>
-            
+
             <TouchableOpacity
               style={styles.menuItem}
-              onPress={() => { 
-                setShowMenu(false); 
-                setShowDownloads(true); 
+              onPress={() => {
+                setShowMenu(false);
+                setShowDownloads(true);
               }}
             >
               <Ionicons name="download-outline" size={22} color="#e2e8f0" />
@@ -1851,20 +1867,20 @@ export default function WebViewScreen() {
               {(activeDownloads.length > 0 || getQueuedCount() > 0 || downloadHistory.length > 0) && (
                 <View style={styles.badge}>
                   <Text style={styles.badgeText}>
-                    {activeDownloads.length + getQueuedCount() > 0 
+                    {activeDownloads.length + getQueuedCount() > 0
                       ? activeDownloads.length + getQueuedCount()
                       : downloadHistory.length}
                   </Text>
                 </View>
               )}
             </TouchableOpacity>
-            
+
             <TouchableOpacity
               style={styles.menuItem}
-              onPress={() => { 
-                setShowMenu(false); 
+              onPress={() => {
+                setShowMenu(false);
                 hideFabButton();
-                router.push('/config'); 
+                router.push('/config');
               }}
             >
               <Ionicons name="settings-outline" size={22} color="#e2e8f0" />
@@ -1885,15 +1901,15 @@ export default function WebViewScreen() {
                   <Ionicons name="trash-outline" size={22} color="#ef4444" />
                 </TouchableOpacity>
               )}
-              <TouchableOpacity 
-                onPress={() => setShowDownloads(false)} 
+              <TouchableOpacity
+                onPress={() => setShowDownloads(false)}
                 style={styles.headerButton}
               >
                 <Ionicons name="close" size={26} color="#e2e8f0" />
               </TouchableOpacity>
             </View>
           </View>
-          
+
           <ScrollView style={styles.downloadsContent} showsVerticalScrollIndicator={false}>
             {activeDownloads.length > 0 && (
               <>
@@ -1917,12 +1933,12 @@ export default function WebViewScreen() {
                     </View>
                     <View style={styles.progressContainer}>
                       <View style={styles.progressBg}>
-                        <View 
+                        <View
                           style={[
-                            styles.progressBar, 
+                            styles.progressBar,
                             { width: `${Math.min(item.progress, 100)}%` },
                             item.status === 'failed' && styles.progressBarFailed
-                          ]} 
+                          ]}
                         />
                       </View>
                       <Text style={styles.progressText}>{Math.round(item.progress)}%</Text>
@@ -2019,8 +2035,8 @@ export default function WebViewScreen() {
                   <View key={item.id} style={styles.downloadItem}>
                     <View style={styles.downloadRow}>
                       {item.thumbnailUri ? (
-                        <Image 
-                          source={{ uri: item.thumbnailUri }} 
+                        <Image
+                          source={{ uri: item.thumbnailUri }}
                           style={styles.thumbnail}
                           resizeMode="cover"
                         />
@@ -2084,22 +2100,22 @@ export default function WebViewScreen() {
                   <Ionicons name="trash-outline" size={22} color="#ef4444" />
                 </TouchableOpacity>
               )}
-              <TouchableOpacity 
-                onPress={() => setShowPlaybackHistory(false)} 
+              <TouchableOpacity
+                onPress={() => setShowPlaybackHistory(false)}
                 style={styles.headerButton}
               >
                 <Ionicons name="close" size={26} color="#e2e8f0" />
               </TouchableOpacity>
             </View>
           </View>
-          
+
           <ScrollView style={styles.downloadsContent} showsVerticalScrollIndicator={false}>
             {playbackHistory.filter(h => !h.completed).length > 0 && (
               <>
                 <Text style={styles.sectionTitle}>Sin terminar</Text>
                 {playbackHistory.filter(h => !h.completed).map(item => (
-                  <TouchableOpacity 
-                    key={item.id} 
+                  <TouchableOpacity
+                    key={item.id}
                     style={styles.downloadItem}
                     onPress={() => resumeFromHistory(item)}
                     activeOpacity={0.7}
@@ -2138,8 +2154,8 @@ export default function WebViewScreen() {
                       </View>
                     </View>
                     <View style={styles.downloadActions}>
-                      <TouchableOpacity 
-                        style={styles.actionButton} 
+                      <TouchableOpacity
+                        style={styles.actionButton}
                         onPress={(e) => {
                           e.stopPropagation();
                           resumeFromHistory(item);
@@ -2148,7 +2164,7 @@ export default function WebViewScreen() {
                         <Ionicons name="play" size={20} color="#10b981" />
                         <Text style={[styles.actionText, { color: '#10b981' }]}>Continuar</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity 
+                      <TouchableOpacity
                         style={styles.actionButton}
                         onPress={(e) => {
                           e.stopPropagation();
@@ -2168,8 +2184,8 @@ export default function WebViewScreen() {
               <>
                 <Text style={styles.sectionTitle}>Vistos recientemente</Text>
                 {playbackHistory.filter(h => h.completed).map(item => (
-                  <TouchableOpacity 
-                    key={item.id} 
+                  <TouchableOpacity
+                    key={item.id}
                     style={[styles.downloadItem, { opacity: 0.7 }]}
                     onPress={() => resumeFromHistory({ ...item, currentTime: 0 })}
                     activeOpacity={0.7}
@@ -2200,7 +2216,7 @@ export default function WebViewScreen() {
                       </View>
                     </View>
                     <View style={styles.downloadActions}>
-                      <TouchableOpacity 
+                      <TouchableOpacity
                         style={styles.actionButton}
                         onPress={(e) => {
                           e.stopPropagation();
@@ -2210,7 +2226,7 @@ export default function WebViewScreen() {
                         <Ionicons name="refresh" size={20} color="#6366f1" />
                         <Text style={styles.actionText}>Ver de nuevo</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity 
+                      <TouchableOpacity
                         style={styles.actionButton}
                         onPress={(e) => {
                           e.stopPropagation();
@@ -2243,436 +2259,70 @@ export default function WebViewScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f172a',
-    justifyContent: 'center',
-  },
-  webview: {
-    flex: 1
-  },
-  // MEJORA: Indicador lateral derecho - pleca sutil
-  sideIndicator: {
-    position: 'absolute',
-    right: 0,
-    top: '50%',
-    transform: [{ translateY: -30 }],
-    zIndex: 100,
-  },
-  indicatorTab: {
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(30, 41, 59, 0.85)',
-    paddingVertical: 12,
-    paddingHorizontal: 6,
-    borderTopLeftRadius: 12,
-    borderBottomLeftRadius: 12,
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: -2, height: 0 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-  },
-  indicatorBadge: {
-    backgroundColor: '#ef4444',
-    borderRadius: 8,
-    minWidth: 16,
-    height: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 6,
-    paddingHorizontal: 4,
-  },
-  indicatorBadgeText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  // MEJORA: FAB lateral derecho centrado
-  fabContainerRight: {
-    position: 'absolute',
-    right: 16,
-    top: '50%',
-    transform: [{ translateY: -28 }],
-    zIndex: 101,
-  },
-  fab: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#6366f1',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-  },
-  menuOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    zIndex: 102,
-  },
-  // MEJORA: Menú lateral derecho
-  menuRight: {
-    position: 'absolute',
-    right: 16,
-    top: '50%',
-    transform: [{ translateY: -120 }],
-    backgroundColor: '#1e293b',
-    borderRadius: 16,
-    paddingVertical: 8,
-    minWidth: 200,
-    zIndex: 103,
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-  },
-  menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-  },
-  menuText: {
-    color: '#e2e8f0',
-    fontSize: 16,
-    marginLeft: 14,
-    flex: 1,
-  },
-  badge: {
-    backgroundColor: '#6366f1',
-    borderRadius: 10,
-    minWidth: 22,
-    height: 22,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 6,
-  },
-  badgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  downloadsModal: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#0f172a',
-    zIndex: 200,
-  },
-  downloadsHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 18,
-    paddingTop: 50,
-    paddingBottom: 16,
-    backgroundColor: '#1e293b',
-    borderBottomWidth: 1,
-    borderBottomColor: '#334155',
-  },
-  downloadsTitle: {
-    color: '#e2e8f0',
-    fontSize: 22,
-    fontWeight: 'bold',
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  headerButton: {
-    padding: 8,
-  },
-  downloadsContent: {
-    flex: 1,
-    padding: 16,
-  },
-  sectionTitle: {
-    color: '#94a3b8',
-    fontSize: 13,
-    fontWeight: '600',
-    marginTop: 16,
-    marginBottom: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  downloadItem: {
-    backgroundColor: '#1e293b',
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  downloadRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  fileIconContainer: {
-    width: 50,
-    height: 50,
-    borderRadius: 10,
-    backgroundColor: 'rgba(99, 102, 241, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  thumbnail: {
-    width: 50,
-    height: 50,
-    borderRadius: 10,
-    marginRight: 12,
-    backgroundColor: '#334155',
-  },
-  downloadInfo: {
-    flex: 1,
-  },
-  downloadFilename: {
-    color: '#e2e8f0',
-    fontSize: 15,
-    fontWeight: '500',
-    marginBottom: 4,
-  },
-  downloadMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  downloadSize: {
-    color: '#94a3b8',
-    fontSize: 13,
-  },
-  downloadSpeed: {
-    color: '#6366f1',
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  downloadDuration: {
-    color: '#10b981',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  downloadDate: {
-    color: '#64748b',
-    fontSize: 12,
-  },
-  queueText: {
-    color: '#94a3b8',
-    fontSize: 13,
-    fontStyle: 'italic',
-  },
-  pausedText: {
-    color: '#fbbf24',
-    fontSize: 13,
-  },
-  progressContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 10,
-  },
-  progressBg: {
-    flex: 1,
-    height: 6,
-    backgroundColor: '#334155',
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  progressBar: {
-    height: '100%',
-    backgroundColor: '#6366f1',
-    borderRadius: 3,
-  },
-  progressBarFailed: {
-    backgroundColor: '#ef4444',
-  },
-  progressText: {
-    color: '#94a3b8',
-    fontSize: 12,
-    fontWeight: '600',
-    minWidth: 40,
-    textAlign: 'right',
-  },
-  errorContainer: {
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 10,
-  },
-  errorText: {
-    color: '#ef4444',
-    fontSize: 12,
-  },
-  downloadActions: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 4,
-    flexWrap: 'wrap',
-  },
-  actionButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    backgroundColor: 'rgba(99, 102, 241, 0.1)',
-    borderRadius: 8,
-  },
-  actionText: {
-    color: '#6366f1',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  emptyState: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 60,
-  },
-  emptyTitle: {
-    color: '#e2e8f0',
-    fontSize: 18,
-    fontWeight: '600',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptyText: {
-    color: '#64748b',
-    fontSize: 14,
-    textAlign: 'center',
-    paddingHorizontal: 40,
-    lineHeight: 20,
-  },
-  permissionModal: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 300,
-    padding: 20,
-  },
-  permissionContent: {
-    backgroundColor: '#1e293b',
-    borderRadius: 20,
-    padding: 24,
-    width: '100%',
-    maxWidth: 340,
-    alignItems: 'center',
-  },
-  permissionTitle: {
-    color: '#e2e8f0',
-    fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 12,
-    textAlign: 'center',
-  },
-  permissionText: {
-    color: '#94a3b8',
-    fontSize: 14,
-    textAlign: 'center',
-    marginBottom: 20,
-    lineHeight: 20,
-  },
-  permissionList: {
-    width: '100%',
-    marginBottom: 24,
-  },
-  permissionItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#334155',
-  },
-  permissionItemText: {
-    color: '#e2e8f0',
-    fontSize: 14,
-    flex: 1,
-  },
-  permissionButton: {
-    backgroundColor: '#6366f1',
-    paddingVertical: 14,
-    paddingHorizontal: 32,
-    borderRadius: 12,
-    width: '100%',
-    marginBottom: 12,
-  },
-  permissionButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  permissionSkipButton: {
-    paddingVertical: 10,
-  },
-  permissionSkipText: {
-    color: '#64748b',
-    fontSize: 14,
-  },
-  thumbnailContainer: {
-    position: 'relative',
-    width: 100,
-    height: 60,
-    marginRight: 12,
-    borderRadius: 8,
-    overflow: 'hidden',
-  },
-  historyThumbnail: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#334155',
-  },
-  playOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  completedOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  durationBadge: {
-    position: 'absolute',
-    bottom: 4,
-    right: 4,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  durationText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '500',
-  },
-  historyProgressBg: {
-    height: 3,
-    backgroundColor: '#334155',
-    borderRadius: 2,
-    marginTop: 8,
-    overflow: 'hidden',
-  },
-  historyProgressBar: {
-    height: '100%',
-    backgroundColor: '#10b981',
-    borderRadius: 2,
-  },
+  container: { flex: 1, backgroundColor: '#0f172a', justifyContent: 'center' },
+  webview: { flex: 1 },
+  sideIndicator: { position: 'absolute', right: 0, top: '50%', transform: [{ translateY: -30 }], zIndex: 100 },
+  indicatorTab: { flexDirection: 'column', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(30, 41, 59, 0.85)', paddingVertical: 12, paddingHorizontal: 6, borderTopLeftRadius: 12, borderBottomLeftRadius: 12, elevation: 4, shadowColor: '#000', shadowOffset: { width: -2, height: 0 }, shadowOpacity: 0.3, shadowRadius: 4 },
+  indicatorBadge: { backgroundColor: '#ef4444', borderRadius: 8, minWidth: 16, height: 16, justifyContent: 'center', alignItems: 'center', marginTop: 6, paddingHorizontal: 4 },
+  indicatorBadgeText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
+  fabContainerRight: { position: 'absolute', right: 16, top: '50%', transform: [{ translateY: -28 }], zIndex: 101 },
+  fab: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#6366f1', justifyContent: 'center', alignItems: 'center', elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 6 },
+  menuOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 102 },
+  menuRight: { position: 'absolute', right: 16, top: '50%', transform: [{ translateY: -120 }], backgroundColor: '#1e293b', borderRadius: 16, paddingVertical: 8, minWidth: 200, zIndex: 103, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
+  menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 18 },
+  menuText: { color: '#e2e8f0', fontSize: 16, marginLeft: 14, flex: 1 },
+  badge: { backgroundColor: '#6366f1', borderRadius: 10, minWidth: 22, height: 22, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 6 },
+  badgeText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
+  downloadsModal: { ...StyleSheet.absoluteFillObject, backgroundColor: '#0f172a', zIndex: 200 },
+  downloadsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 18, paddingTop: 50, paddingBottom: 16, backgroundColor: '#1e293b', borderBottomWidth: 1, borderBottomColor: '#334155' },
+  downloadsTitle: { color: '#e2e8f0', fontSize: 22, fontWeight: 'bold' },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  headerButton: { padding: 8 },
+  downloadsContent: { flex: 1, padding: 16 },
+  sectionTitle: { color: '#94a3b8', fontSize: 13, fontWeight: '600', marginTop: 16, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 },
+  downloadItem: { backgroundColor: '#1e293b', borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: '#334155' },
+  downloadRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  fileIconContainer: { width: 50, height: 50, borderRadius: 10, backgroundColor: 'rgba(99, 102, 241, 0.1)', justifyContent: 'center', alignItems: 'center', marginRight: 12 },
+  thumbnail: { width: 50, height: 50, borderRadius: 10, marginRight: 12, backgroundColor: '#334155' },
+  downloadInfo: { flex: 1 },
+  downloadFilename: { color: '#e2e8f0', fontSize: 15, fontWeight: '500', marginBottom: 4 },
+  downloadMeta: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  downloadSize: { color: '#94a3b8', fontSize: 13 },
+  downloadSpeed: { color: '#6366f1', fontSize: 13, fontWeight: '500' },
+  downloadDuration: { color: '#10b981', fontSize: 12, marginTop: 2 },
+  downloadDate: { color: '#64748b', fontSize: 12 },
+  queueText: { color: '#94a3b8', fontSize: 13, fontStyle: 'italic' },
+  pausedText: { color: '#fbbf24', fontSize: 13 },
+  progressContainer: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
+  progressBg: { flex: 1, height: 6, backgroundColor: '#334155', borderRadius: 3, overflow: 'hidden' },
+  progressBar: { height: '100%', backgroundColor: '#6366f1', borderRadius: 3 },
+  progressBarFailed: { backgroundColor: '#ef4444' },
+  progressText: { color: '#94a3b8', fontSize: 12, fontWeight: '600', minWidth: 40, textAlign: 'right' },
+  errorContainer: { backgroundColor: 'rgba(239, 68, 68, 0.1)', borderRadius: 6, padding: 8, marginBottom: 10 },
+  errorText: { color: '#ef4444', fontSize: 12 },
+  downloadActions: { flexDirection: 'row', gap: 8, marginTop: 4, flexWrap: 'wrap' },
+  actionButton: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: 'rgba(99, 102, 241, 0.1)', borderRadius: 8 },
+  actionText: { color: '#6366f1', fontSize: 14, fontWeight: '500' },
+  emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 60 },
+  emptyTitle: { color: '#e2e8f0', fontSize: 18, fontWeight: '600', marginTop: 16, marginBottom: 8 },
+  emptyText: { color: '#64748b', fontSize: 14, textAlign: 'center', paddingHorizontal: 40, lineHeight: 20 },
+  permissionModal: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0, 0, 0, 0.8)', justifyContent: 'center', alignItems: 'center', zIndex: 300, padding: 20 },
+  permissionContent: { backgroundColor: '#1e293b', borderRadius: 20, padding: 24, width: '100%', maxWidth: 340, alignItems: 'center' },
+  permissionTitle: { color: '#e2e8f0', fontSize: 22, fontWeight: 'bold', marginBottom: 12, textAlign: 'center' },
+  permissionText: { color: '#94a3b8', fontSize: 14, textAlign: 'center', marginBottom: 20, lineHeight: 20 },
+  permissionList: { width: '100%', marginBottom: 24 },
+  permissionItem: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#334155' },
+  permissionItemText: { color: '#e2e8f0', fontSize: 14, flex: 1 },
+  permissionButton: { backgroundColor: '#6366f1', paddingVertical: 14, paddingHorizontal: 32, borderRadius: 12, width: '100%', marginBottom: 12 },
+  permissionButtonText: { color: '#fff', fontSize: 16, fontWeight: '600', textAlign: 'center' },
+  permissionSkipButton: { paddingVertical: 10 },
+  permissionSkipText: { color: '#64748b', fontSize: 14 },
+  thumbnailContainer: { position: 'relative', width: 100, height: 60, marginRight: 12, borderRadius: 8, overflow: 'hidden' },
+  historyThumbnail: { width: '100%', height: '100%', backgroundColor: '#334155' },
+  playOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.4)', justifyContent: 'center', alignItems: 'center' },
+  completedOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.5)', justifyContent: 'center', alignItems: 'center' },
+  durationBadge: { position: 'absolute', bottom: 4, right: 4, backgroundColor: 'rgba(0, 0, 0, 0.8)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  durationText: { color: '#fff', fontSize: 10, fontWeight: '500' },
+  historyProgressBg: { height: 3, backgroundColor: '#334155', borderRadius: 2, marginTop: 8, overflow: 'hidden' },
+  historyProgressBar: { height: '100%', backgroundColor: '#10b981', borderRadius: 2 },
 });
