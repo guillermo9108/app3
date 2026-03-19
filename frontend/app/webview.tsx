@@ -27,30 +27,18 @@ import { Ionicons } from '@expo/vector-icons';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as MediaLibrary from 'expo-media-library';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import * as BackgroundFetch from 'expo-background-fetch';
-import * as TaskManager from 'expo-task-manager';
+
+// Importar servicio de notificaciones del servidor
+import { 
+  saveSessionToken, 
+  triggerImmediateCheck,
+  clearNotificationCount,
+  checkForNewNotifications
+} from '../src/services/NotificationService';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 const DOWNLOAD_EXTENSIONS = /\.(mp4|mkv|avi|mov|wmv|flv|webm|mp3|aac|flac|wav|ogg|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|apk|exe|dmg|iso)/i;
-
-// Nombre de la tarea de background
-const BACKGROUND_NOTIFICATION_TASK = 'background-notification-check';
-
-// Definir la tarea de background para verificar notificaciones
-TaskManager.defineTask(BACKGROUND_NOTIFICATION_TASK, async () => {
-  try {
-    console.log('[StreamPay] Background fetch ejecutado');
-    // Aquí puedes hacer fetch a tu servidor para verificar notificaciones
-    // const response = await fetch('TU_SERVIDOR/api/notifications');
-    // const data = await response.json();
-    // if (data.hasNotifications) { mostrar notificación local }
-    return BackgroundFetch.BackgroundFetchResult.NewData;
-  } catch (error) {
-    console.error('[StreamPay] Error en background fetch:', error);
-    return BackgroundFetch.BackgroundFetchResult.Failed;
-  }
-});
 
 // Configurar canales de notificaciones para Android
 if (Platform.OS === 'android') {
@@ -248,6 +236,7 @@ export default function WebViewScreen() {
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistoryItem[]>([]);
   const [showPlaybackHistory, setShowPlaybackHistory] = useState(false);
   const [currentVideoOrientation, setCurrentVideoOrientation] = useState<'portrait' | 'landscape'>('portrait');
+  const [pendingNotificationLink, setPendingNotificationLink] = useState<string | null>(null);
 
   const isVideoPlayingRef = useRef(false);
   const showMenuRef = useRef(false);
@@ -289,25 +278,28 @@ export default function WebViewScreen() {
     }
   }, [playbackHistory, permissionsChecked]);
 
-  // Registrar Background Fetch
-  const registerBackgroundFetch = async () => {
-    try {
-      const status = await BackgroundFetch.getStatusAsync();
-      if (status === BackgroundFetch.BackgroundFetchStatus.Available) {
-        await BackgroundFetch.registerTaskAsync(BACKGROUND_NOTIFICATION_TASK, {
-          minimumInterval: 15 * 60, // 15 minutos mínimo
-          stopOnTerminate: false,
-          startOnBoot: true,
-        });
-        console.log('[StreamPay] Background fetch registrado');
-      }
-    } catch (error) {
-      console.error('[StreamPay] Error registrando background fetch:', error);
+  // Manejar link pendiente de notificación
+  useEffect(() => {
+    if (pendingNotificationLink && serverUrl && webViewRef.current) {
+      const fullUrl = pendingNotificationLink.startsWith('http') 
+        ? pendingNotificationLink 
+        : `${serverUrl}${pendingNotificationLink}`;
+      
+      console.log('[StreamPay] Navegando a link de notificación:', fullUrl);
+      webViewRef.current.injectJavaScript(`
+        window.location.href = '${fullUrl}';
+        true;
+      `);
+      setPendingNotificationLink(null);
     }
-  };
+  }, [pendingNotificationLink, serverUrl]);
 
   // Verificar notificaciones pendientes al volver de segundo plano
-  const checkPendingNotifications = useCallback(() => {
+  const checkPendingNotifications = useCallback(async () => {
+    // Verificar desde el servidor
+    await triggerImmediateCheck();
+    
+    // También inyectar JS para verificar en la web
     webViewRef.current?.injectJavaScript(`
       (function() {
         // Verificar si hay notificaciones pendientes del Service Worker
@@ -609,7 +601,7 @@ export default function WebViewScreen() {
         { text: 'Salir', style: 'destructive', onPress: () => BackHandler.exitApp() }
       ]
     );
-    return true; // Siempre retornar true para evitar cierre inesperado
+    return true;
   }, [showFab, hideFabButton]);
 
   // useEffect principal con listener de notificaciones integrado
@@ -619,13 +611,20 @@ export default function WebViewScreen() {
     loadDownloadQueue();
     loadPlaybackHistory();
     initializePermissions();
-    registerBackgroundFetch();
 
     const backHandler = BackHandler.addEventListener('hardwareBackPress', handleBackPress);
     
     // Listener de notificaciones integrado directamente (CORREGIDO: fuga de memoria)
     const notificationSubscription = Notifications.addNotificationResponseReceivedListener(response => {
       const data = response.notification.request.content.data;
+      
+      // Manejar notificaciones del servidor
+      if (data?.type === 'server-notification' && data?.link) {
+        console.log('[StreamPay] Notificación del servidor tocada, link:', data.link);
+        setPendingNotificationLink(data.link);
+      }
+      
+      // Manejar notificaciones web
       if (data?.type === 'web-notification' && data?.url) {
         webViewRef.current?.injectJavaScript(`
           window.location.href = '${data.url}';
@@ -744,7 +743,7 @@ export default function WebViewScreen() {
 
     const progress = Math.round((currentTime / duration) * 100);
     const completed = progress >= 95;
-    const id = generateUniqueId(url); // Usa la función corregida sin btoa
+    const id = generateUniqueId(url);
 
     setPlaybackHistory(prev => {
       const existingIndex = prev.findIndex(item => item.id === id);
@@ -1170,6 +1169,12 @@ export default function WebViewScreen() {
     try {
       const data = JSON.parse(event.nativeEvent.data);
 
+      // Manejar token de sesión del servidor
+      if (data.type === 'sessionToken') {
+        await saveSessionToken(data.token);
+        console.log('[StreamPay] Token de sesión extraído y guardado');
+      }
+
       if (data.type === 'fullscreenchange') {
         if (data.isFullscreen && data.videoWidth && data.videoHeight) {
           handleVideoFullscreen(data.videoWidth, data.videoHeight, true);
@@ -1224,7 +1229,12 @@ export default function WebViewScreen() {
       }
 
       if (data.type === 'notificationCount') {
-        console.log('[StreamPay] Notificaciones pendientes:', data.count);
+        console.log('[StreamPay] Notificaciones pendientes en web:', data.count);
+      }
+
+      // Cuando el usuario ve las notificaciones en la web
+      if (data.type === 'notificationsViewed') {
+        await clearNotificationCount();
       }
     } catch (error) {
       console.error('[StreamPay] Error mensaje:', error);
@@ -1489,6 +1499,42 @@ export default function WebViewScreen() {
         } catch(e) {}
       };
 
+      // ===== EXTRACCIÓN DE TOKEN DE SESIÓN =====
+      (function extractToken() {
+        const token = localStorage.getItem('sp_session_token');
+        if (token) {
+          notify('sessionToken', { token: token });
+        }
+        
+        // Observar cambios en localStorage para detectar login/logout
+        const originalSetItem = localStorage.setItem;
+        localStorage.setItem = function(key, value) {
+          originalSetItem.apply(this, arguments);
+          if (key === 'sp_session_token') {
+            notify('sessionToken', { token: value });
+          }
+        };
+
+        // También detectar si el token se elimina (logout)
+        const originalRemoveItem = localStorage.removeItem;
+        localStorage.removeItem = function(key) {
+          originalRemoveItem.apply(this, arguments);
+          if (key === 'sp_session_token') {
+            notify('sessionToken', { token: '' });
+          }
+        };
+      })();
+
+      // ===== DETECCIÓN DE VISUALIZACIÓN DE NOTIFICACIONES =====
+      // Cuando el usuario hace clic en el área de notificaciones
+      document.addEventListener('click', function(e) {
+        const notificationArea = e.target.closest('.notifications, .notification-list, [data-notifications], #notifications');
+        if (notificationArea) {
+          notify('notificationsViewed', {});
+        }
+      });
+
+      // ===== DETECCIÓN DE DESCARGAS =====
       document.addEventListener('click', function(e) {
         const a = e.target.closest('a');
         if (a && a.href) {
@@ -1507,6 +1553,7 @@ export default function WebViewScreen() {
         }
       }, true);
 
+      // ===== OCULTAR BOTONES DE DESCARGA EN VIDEOS =====
       const hideDownloadButtons = () => {
         const selectors = [
           'video::-internal-media-controls-download-button',
@@ -1526,6 +1573,7 @@ export default function WebViewScreen() {
       };
       hideDownloadButtons();
 
+      // ===== OBSERVADOR DE VIDEOS =====
       const checkVideos = () => {
         document.querySelectorAll('video').forEach(v => {
           if (!v.hasAttribute('data-sp-observed')) {
@@ -1605,6 +1653,7 @@ export default function WebViewScreen() {
           }
         });
 
+        // ===== OBSERVADOR DE AUDIO =====
         document.querySelectorAll('audio').forEach(a => {
           if (!a.hasAttribute('data-sp-observed')) {
             a.setAttribute('data-sp-observed', '1');
@@ -1630,6 +1679,7 @@ export default function WebViewScreen() {
       setInterval(checkVideos, 2000);
       checkVideos();
 
+      // ===== FULLSCREEN =====
       document.addEventListener('fullscreenchange', () => {
         const video = document.fullscreenElement?.querySelector('video') || document.fullscreenElement;
         const isFs = !!document.fullscreenElement;
@@ -1650,6 +1700,7 @@ export default function WebViewScreen() {
         });
       });
 
+      // ===== INTERCEPTOR DE NOTIFICACIONES WEB =====
       if ('Notification' in window) {
         const OriginalNotification = window.Notification;
         window.Notification = function(title, options = {}) {
@@ -1667,6 +1718,7 @@ export default function WebViewScreen() {
         window.Notification.requestPermission = OriginalNotification.requestPermission.bind(OriginalNotification);
       }
 
+      // ===== SERVICE WORKER MESSAGES =====
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.addEventListener('message', (event) => {
           if (event.data && event.data.type === 'notification') {
@@ -1680,6 +1732,17 @@ export default function WebViewScreen() {
           }
         });
       }
+
+      // ===== FUNCIÓN PARA VERIFICAR NOTIFICACIONES (llamable desde la app) =====
+      window.__checkNotifications = function() {
+        const countElements = document.querySelectorAll('.notification-count, .unread-count, [data-notification-count]');
+        countElements.forEach(el => {
+          const count = parseInt(el.textContent || el.innerText || '0');
+          if (count > 0) {
+            notify('notificationCount', { count: count });
+          }
+        });
+      };
     })();
     true;
   `;
@@ -1761,7 +1824,6 @@ export default function WebViewScreen() {
         androidLayerType="hardware"
         sharedCookiesEnabled={true}
         onRenderProcessGone={(syntheticEvent) => {
-          const { nativeEvent } = syntheticEvent;
           console.warn('[StreamPay] WebView process crashed, reloading...');
           webViewRef.current?.reload();
         }}
@@ -1769,18 +1831,12 @@ export default function WebViewScreen() {
 
       {/* Indicador lateral derecho */}
       {!isFullscreen && !showFab && (
-        <TouchableOpacity
-          style={styles.sideIndicator}
-          onPress={handleIndicatorPress}
-          activeOpacity={0.7}
-        >
+        <TouchableOpacity style={styles.sideIndicator} onPress={handleIndicatorPress} activeOpacity={0.7}>
           <View style={styles.indicatorTab}>
             <Ionicons name="chevron-back" size={16} color="#6366f1" />
             {(activeDownloads.length > 0 || getQueuedCount() > 0) && (
               <View style={styles.indicatorBadge}>
-                <Text style={styles.indicatorBadgeText}>
-                  {activeDownloads.length + getQueuedCount()}
-                </Text>
+                <Text style={styles.indicatorBadgeText}>{activeDownloads.length + getQueuedCount()}</Text>
               </View>
             )}
           </View>
@@ -1789,26 +1845,8 @@ export default function WebViewScreen() {
 
       {/* FAB lateral derecho */}
       {!isFullscreen && showFab && (
-        <Animated.View
-          style={[
-            styles.fabContainerRight,
-            {
-              transform: [{ translateX: fabPosition }],
-              opacity: fabOpacity
-            }
-          ]}
-        >
-          <TouchableOpacity
-            style={styles.fab}
-            onPress={() => {
-              if (showMenu) {
-                setShowMenu(false);
-                hideFabButton();
-              } else {
-                setShowMenu(true);
-              }
-            }}
-          >
+        <Animated.View style={[styles.fabContainerRight, { transform: [{ translateX: fabPosition }], opacity: fabOpacity }]}>
+          <TouchableOpacity style={styles.fab} onPress={() => { if (showMenu) { setShowMenu(false); hideFabButton(); } else { setShowMenu(true); } }}>
             <Ionicons name={showMenu ? "close" : "menu"} size={26} color="#ffffff" />
           </TouchableOpacity>
         </Animated.View>
@@ -1817,72 +1855,31 @@ export default function WebViewScreen() {
       {/* Menú lateral derecho */}
       {showMenu && !isFullscreen && (
         <>
-          <TouchableOpacity
-            style={styles.menuOverlay}
-            onPress={() => {
-              setShowMenu(false);
-              hideFabButton();
-            }}
-          />
+          <TouchableOpacity style={styles.menuOverlay} onPress={() => { setShowMenu(false); hideFabButton(); }} />
           <View style={styles.menuRight}>
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                hideFabButton();
-                webViewRef.current?.reload();
-              }}
-            >
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); hideFabButton(); webViewRef.current?.reload(); }}>
               <Ionicons name="refresh-outline" size={22} color="#e2e8f0" />
               <Text style={styles.menuText}>Recargar</Text>
             </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                setShowPlaybackHistory(true);
-              }}
-            >
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); setShowPlaybackHistory(true); }}>
               <Ionicons name="play-circle-outline" size={22} color="#e2e8f0" />
               <Text style={styles.menuText}>Continuar viendo</Text>
               {playbackHistory.filter(h => !h.completed).length > 0 && (
                 <View style={[styles.badge, { backgroundColor: '#10b981' }]}>
-                  <Text style={styles.badgeText}>
-                    {playbackHistory.filter(h => !h.completed).length}
-                  </Text>
+                  <Text style={styles.badgeText}>{playbackHistory.filter(h => !h.completed).length}</Text>
                 </View>
               )}
             </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                setShowDownloads(true);
-              }}
-            >
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); setShowDownloads(true); }}>
               <Ionicons name="download-outline" size={22} color="#e2e8f0" />
               <Text style={styles.menuText}>Descargas</Text>
               {(activeDownloads.length > 0 || getQueuedCount() > 0 || downloadHistory.length > 0) && (
                 <View style={styles.badge}>
-                  <Text style={styles.badgeText}>
-                    {activeDownloads.length + getQueuedCount() > 0
-                      ? activeDownloads.length + getQueuedCount()
-                      : downloadHistory.length}
-                  </Text>
+                  <Text style={styles.badgeText}>{activeDownloads.length + getQueuedCount() > 0 ? activeDownloads.length + getQueuedCount() : downloadHistory.length}</Text>
                 </View>
               )}
             </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setShowMenu(false);
-                hideFabButton();
-                router.push('/config');
-              }}
-            >
+            <TouchableOpacity style={styles.menuItem} onPress={() => { setShowMenu(false); hideFabButton(); router.push('/config'); }}>
               <Ionicons name="settings-outline" size={22} color="#e2e8f0" />
               <Text style={styles.menuText}>Configuración</Text>
             </TouchableOpacity>
@@ -1896,195 +1893,16 @@ export default function WebViewScreen() {
           <View style={styles.downloadsHeader}>
             <Text style={styles.downloadsTitle}>Descargas</Text>
             <View style={styles.headerActions}>
-              {downloadHistory.length > 0 && (
-                <TouchableOpacity onPress={clearAllHistory} style={styles.headerButton}>
-                  <Ionicons name="trash-outline" size={22} color="#ef4444" />
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                onPress={() => setShowDownloads(false)}
-                style={styles.headerButton}
-              >
-                <Ionicons name="close" size={26} color="#e2e8f0" />
-              </TouchableOpacity>
+              {downloadHistory.length > 0 && (<TouchableOpacity onPress={clearAllHistory} style={styles.headerButton}><Ionicons name="trash-outline" size={22} color="#ef4444" /></TouchableOpacity>)}
+              <TouchableOpacity onPress={() => setShowDownloads(false)} style={styles.headerButton}><Ionicons name="close" size={26} color="#e2e8f0" /></TouchableOpacity>
             </View>
           </View>
-
           <ScrollView style={styles.downloadsContent} showsVerticalScrollIndicator={false}>
-            {activeDownloads.length > 0 && (
-              <>
-                <Text style={styles.sectionTitle}>Descargando</Text>
-                {activeDownloads.map(item => (
-                  <View key={item.id} style={styles.downloadItem}>
-                    <View style={styles.downloadRow}>
-                      <View style={styles.fileIconContainer}>
-                        <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#6366f1" />
-                      </View>
-                      <View style={styles.downloadInfo}>
-                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text>
-                        <View style={styles.downloadMeta}>
-                          <Text style={styles.downloadSize}>{item.size || '0 B'}</Text>
-                          <Text style={styles.downloadSpeed}>{item.speed}</Text>
-                        </View>
-                        {item.duration && (
-                          <Text style={styles.downloadDuration}>{item.duration}</Text>
-                        )}
-                      </View>
-                    </View>
-                    <View style={styles.progressContainer}>
-                      <View style={styles.progressBg}>
-                        <View
-                          style={[
-                            styles.progressBar,
-                            { width: `${Math.min(item.progress, 100)}%` },
-                            item.status === 'failed' && styles.progressBarFailed
-                          ]}
-                        />
-                      </View>
-                      <Text style={styles.progressText}>{Math.round(item.progress)}%</Text>
-                    </View>
-                    {item.status === 'failed' && (
-                      <View style={styles.errorContainer}>
-                        <Text style={styles.errorText}>{item.error || 'Error desconocido'}</Text>
-                      </View>
-                    )}
-                    <View style={styles.downloadActions}>
-                      {item.status === 'failed' ? (
-                        <>
-                          <TouchableOpacity style={styles.actionButton} onPress={() => retryDownload(item)}>
-                            <Ionicons name="refresh" size={20} color="#6366f1" />
-                            <Text style={styles.actionText}>Reintentar</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
-                            <Ionicons name="close" size={20} color="#ef4444" />
-                            <Text style={[styles.actionText, { color: '#ef4444' }]}>Cancelar</Text>
-                          </TouchableOpacity>
-                        </>
-                      ) : (
-                        <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
-                          <Ionicons name="close" size={20} color="#ef4444" />
-                          <Text style={[styles.actionText, { color: '#ef4444' }]}>Cancelar</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  </View>
-                ))}
-              </>
-            )}
-
-            {getQueuedCount() > 0 && (
-              <>
-                <Text style={styles.sectionTitle}>En cola ({getQueuedCount()})</Text>
-                {downloadQueue.filter(d => d.status === 'queued').map(item => (
-                  <View key={item.id} style={styles.downloadItem}>
-                    <View style={styles.downloadRow}>
-                      <View style={styles.fileIconContainer}>
-                        <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#94a3b8" />
-                      </View>
-                      <View style={styles.downloadInfo}>
-                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text>
-                        <Text style={styles.queueText}>Esperando...</Text>
-                      </View>
-                    </View>
-                    <View style={styles.downloadActions}>
-                      <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
-                        <Ionicons name="close" size={20} color="#ef4444" />
-                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ))}
-              </>
-            )}
-
-            {getPausedCount() > 0 && (
-              <>
-                <Text style={styles.sectionTitle}>Pausadas ({getPausedCount()})</Text>
-                {downloadQueue.filter(d => d.status === 'paused').map(item => (
-                  <View key={item.id} style={styles.downloadItem}>
-                    <View style={styles.downloadRow}>
-                      <View style={styles.fileIconContainer}>
-                        <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#fbbf24" />
-                      </View>
-                      <View style={styles.downloadInfo}>
-                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text>
-                        <Text style={styles.pausedText}>
-                          {item.downloadedBytes ? `${formatBytes(item.downloadedBytes)} descargados` : 'Pausado'}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.downloadActions}>
-                      <TouchableOpacity style={styles.actionButton} onPress={() => resumeDownload(item)}>
-                        <Ionicons name="play" size={20} color="#10b981" />
-                        <Text style={[styles.actionText, { color: '#10b981' }]}>Reanudar</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}>
-                        <Ionicons name="trash-outline" size={20} color="#ef4444" />
-                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Eliminar</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ))}
-              </>
-            )}
-
-            {downloadHistory.length > 0 && (
-              <>
-                <Text style={styles.sectionTitle}>Historial</Text>
-                {downloadHistory.map(item => (
-                  <View key={item.id} style={styles.downloadItem}>
-                    <View style={styles.downloadRow}>
-                      {item.thumbnailUri ? (
-                        <Image
-                          source={{ uri: item.thumbnailUri }}
-                          style={styles.thumbnail}
-                          resizeMode="cover"
-                        />
-                      ) : (
-                        <View style={styles.fileIconContainer}>
-                          <Ionicons name={getFileIcon(item.filename) as any} size={28} color="#10b981" />
-                        </View>
-                      )}
-                      <View style={styles.downloadInfo}>
-                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text>
-                        <View style={styles.downloadMeta}>
-                          <Text style={styles.downloadSize}>{item.size}</Text>
-                          {item.downloadedAt && (
-                            <Text style={styles.downloadDate}>
-                              {new Date(item.downloadedAt).toLocaleDateString()}
-                            </Text>
-                          )}
-                        </View>
-                      </View>
-                    </View>
-                    <View style={styles.downloadActions}>
-                      <TouchableOpacity style={styles.actionButton} onPress={() => openFile(item)}>
-                        <Ionicons name="open-outline" size={20} color="#6366f1" />
-                        <Text style={styles.actionText}>Abrir</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.actionButton} onPress={() => shareFile(item)}>
-                        <Ionicons name="share-outline" size={20} color="#10b981" />
-                        <Text style={[styles.actionText, { color: '#10b981' }]}>Compartir</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.actionButton} onPress={() => deleteDownload(item)}>
-                        <Ionicons name="trash-outline" size={20} color="#ef4444" />
-                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Eliminar</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ))}
-              </>
-            )}
-
-            {activeDownloads.length === 0 && downloadQueue.length === 0 && downloadHistory.length === 0 && (
-              <View style={styles.emptyState}>
-                <Ionicons name="cloud-download-outline" size={64} color="#475569" />
-                <Text style={styles.emptyTitle}>Sin descargas</Text>
-                <Text style={styles.emptyText}>
-                  Las descargas aparecerán aquí cuando descargues archivos desde la web.
-                </Text>
-              </View>
-            )}
+            {activeDownloads.length > 0 && (<><Text style={styles.sectionTitle}>Descargando</Text>{activeDownloads.map(item => (<View key={item.id} style={styles.downloadItem}><View style={styles.downloadRow}><View style={styles.fileIconContainer}><Ionicons name={getFileIcon(item.filename) as any} size={28} color="#6366f1" /></View><View style={styles.downloadInfo}><Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text><View style={styles.downloadMeta}><Text style={styles.downloadSize}>{item.size || '0 B'}</Text><Text style={styles.downloadSpeed}>{item.speed}</Text></View>{item.duration && (<Text style={styles.downloadDuration}>{item.duration}</Text>)}</View></View><View style={styles.progressContainer}><View style={styles.progressBg}><View style={[styles.progressBar, { width: `${Math.min(item.progress, 100)}%` }, item.status === 'failed' && styles.progressBarFailed]} /></View><Text style={styles.progressText}>{Math.round(item.progress)}%</Text></View>{item.status === 'failed' && (<View style={styles.errorContainer}><Text style={styles.errorText}>{item.error || 'Error desconocido'}</Text></View>)}<View style={styles.downloadActions}>{item.status === 'failed' ? (<><TouchableOpacity style={styles.actionButton} onPress={() => retryDownload(item)}><Ionicons name="refresh" size={20} color="#6366f1" /><Text style={styles.actionText}>Reintentar</Text></TouchableOpacity><TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}><Ionicons name="close" size={20} color="#ef4444" /><Text style={[styles.actionText, { color: '#ef4444' }]}>Cancelar</Text></TouchableOpacity></>) : (<TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}><Ionicons name="close" size={20} color="#ef4444" /><Text style={[styles.actionText, { color: '#ef4444' }]}>Cancelar</Text></TouchableOpacity>)}</View></View>))}</>)}
+            {getQueuedCount() > 0 && (<><Text style={styles.sectionTitle}>En cola ({getQueuedCount()})</Text>{downloadQueue.filter(d => d.status === 'queued').map(item => (<View key={item.id} style={styles.downloadItem}><View style={styles.downloadRow}><View style={styles.fileIconContainer}><Ionicons name={getFileIcon(item.filename) as any} size={28} color="#94a3b8" /></View><View style={styles.downloadInfo}><Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text><Text style={styles.queueText}>Esperando...</Text></View></View><View style={styles.downloadActions}><TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}><Ionicons name="close" size={20} color="#ef4444" /><Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text></TouchableOpacity></View></View>))}</>)}
+            {getPausedCount() > 0 && (<><Text style={styles.sectionTitle}>Pausadas ({getPausedCount()})</Text>{downloadQueue.filter(d => d.status === 'paused').map(item => (<View key={item.id} style={styles.downloadItem}><View style={styles.downloadRow}><View style={styles.fileIconContainer}><Ionicons name={getFileIcon(item.filename) as any} size={28} color="#fbbf24" /></View><View style={styles.downloadInfo}><Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text><Text style={styles.pausedText}>{item.downloadedBytes ? `${formatBytes(item.downloadedBytes)} descargados` : 'Pausado'}</Text></View></View><View style={styles.downloadActions}><TouchableOpacity style={styles.actionButton} onPress={() => resumeDownload(item)}><Ionicons name="play" size={20} color="#10b981" /><Text style={[styles.actionText, { color: '#10b981' }]}>Reanudar</Text></TouchableOpacity><TouchableOpacity style={styles.actionButton} onPress={() => cancelDownload(item.id)}><Ionicons name="trash-outline" size={20} color="#ef4444" /><Text style={[styles.actionText, { color: '#ef4444' }]}>Eliminar</Text></TouchableOpacity></View></View>))}</>)}
+            {downloadHistory.length > 0 && (<><Text style={styles.sectionTitle}>Historial</Text>{downloadHistory.map(item => (<View key={item.id} style={styles.downloadItem}><View style={styles.downloadRow}>{item.thumbnailUri ? (<Image source={{ uri: item.thumbnailUri }} style={styles.thumbnail} resizeMode="cover" />) : (<View style={styles.fileIconContainer}><Ionicons name={getFileIcon(item.filename) as any} size={28} color="#10b981" /></View>)}<View style={styles.downloadInfo}><Text style={styles.downloadFilename} numberOfLines={2}>{item.filename}</Text><View style={styles.downloadMeta}><Text style={styles.downloadSize}>{item.size}</Text>{item.downloadedAt && (<Text style={styles.downloadDate}>{new Date(item.downloadedAt).toLocaleDateString()}</Text>)}</View></View></View><View style={styles.downloadActions}><TouchableOpacity style={styles.actionButton} onPress={() => openFile(item)}><Ionicons name="open-outline" size={20} color="#6366f1" /><Text style={styles.actionText}>Abrir</Text></TouchableOpacity><TouchableOpacity style={styles.actionButton} onPress={() => shareFile(item)}><Ionicons name="share-outline" size={20} color="#10b981" /><Text style={[styles.actionText, { color: '#10b981' }]}>Compartir</Text></TouchableOpacity><TouchableOpacity style={styles.actionButton} onPress={() => deleteDownload(item)}><Ionicons name="trash-outline" size={20} color="#ef4444" /><Text style={[styles.actionText, { color: '#ef4444' }]}>Eliminar</Text></TouchableOpacity></View></View>))}</>)}
+            {activeDownloads.length === 0 && downloadQueue.length === 0 && downloadHistory.length === 0 && (<View style={styles.emptyState}><Ionicons name="cloud-download-outline" size={64} color="#475569" /><Text style={styles.emptyTitle}>Sin descargas</Text><Text style={styles.emptyText}>Las descargas aparecerán aquí cuando descargues archivos desde la web.</Text></View>)}
           </ScrollView>
         </View>
       )}
@@ -2095,162 +1913,14 @@ export default function WebViewScreen() {
           <View style={styles.downloadsHeader}>
             <Text style={styles.downloadsTitle}>Continuar viendo</Text>
             <View style={styles.headerActions}>
-              {playbackHistory.length > 0 && (
-                <TouchableOpacity onPress={clearPlaybackHistory} style={styles.headerButton}>
-                  <Ionicons name="trash-outline" size={22} color="#ef4444" />
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                onPress={() => setShowPlaybackHistory(false)}
-                style={styles.headerButton}
-              >
-                <Ionicons name="close" size={26} color="#e2e8f0" />
-              </TouchableOpacity>
+              {playbackHistory.length > 0 && (<TouchableOpacity onPress={clearPlaybackHistory} style={styles.headerButton}><Ionicons name="trash-outline" size={22} color="#ef4444" /></TouchableOpacity>)}
+              <TouchableOpacity onPress={() => setShowPlaybackHistory(false)} style={styles.headerButton}><Ionicons name="close" size={26} color="#e2e8f0" /></TouchableOpacity>
             </View>
           </View>
-
           <ScrollView style={styles.downloadsContent} showsVerticalScrollIndicator={false}>
-            {playbackHistory.filter(h => !h.completed).length > 0 && (
-              <>
-                <Text style={styles.sectionTitle}>Sin terminar</Text>
-                {playbackHistory.filter(h => !h.completed).map(item => (
-                  <TouchableOpacity
-                    key={item.id}
-                    style={styles.downloadItem}
-                    onPress={() => resumeFromHistory(item)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={styles.downloadRow}>
-                      {item.thumbnail ? (
-                        <View style={styles.thumbnailContainer}>
-                          <Image
-                            source={{ uri: item.thumbnail }}
-                            style={styles.historyThumbnail}
-                            resizeMode="cover"
-                          />
-                          <View style={styles.playOverlay}>
-                            <Ionicons name="play" size={24} color="#fff" />
-                          </View>
-                          <View style={styles.durationBadge}>
-                            <Text style={styles.durationText}>
-                              {formatDuration(item.currentTime)} / {formatDuration(item.duration)}
-                            </Text>
-                          </View>
-                        </View>
-                      ) : (
-                        <View style={[styles.fileIconContainer, { width: 100, height: 60, borderRadius: 8 }]}>
-                          <Ionicons name="videocam" size={28} color="#6366f1" />
-                        </View>
-                      )}
-                      <View style={styles.downloadInfo}>
-                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.title}</Text>
-                        <View style={styles.downloadMeta}>
-                          <Text style={styles.downloadSpeed}>{item.progress}% visto</Text>
-                          <Text style={styles.downloadDate}>{formatTimeAgo(item.lastPlayed)}</Text>
-                        </View>
-                        <View style={styles.historyProgressBg}>
-                          <View style={[styles.historyProgressBar, { width: `${item.progress}%` }]} />
-                        </View>
-                      </View>
-                    </View>
-                    <View style={styles.downloadActions}>
-                      <TouchableOpacity
-                        style={styles.actionButton}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          resumeFromHistory(item);
-                        }}
-                      >
-                        <Ionicons name="play" size={20} color="#10b981" />
-                        <Text style={[styles.actionText, { color: '#10b981' }]}>Continuar</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.actionButton}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          deletePlaybackItem(item.id);
-                        }}
-                      >
-                        <Ionicons name="close" size={20} color="#ef4444" />
-                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </TouchableOpacity>
-                ))}
-              </>
-            )}
-
-            {playbackHistory.filter(h => h.completed).length > 0 && (
-              <>
-                <Text style={styles.sectionTitle}>Vistos recientemente</Text>
-                {playbackHistory.filter(h => h.completed).map(item => (
-                  <TouchableOpacity
-                    key={item.id}
-                    style={[styles.downloadItem, { opacity: 0.7 }]}
-                    onPress={() => resumeFromHistory({ ...item, currentTime: 0 })}
-                    activeOpacity={0.7}
-                  >
-                    <View style={styles.downloadRow}>
-                      {item.thumbnail ? (
-                        <View style={styles.thumbnailContainer}>
-                          <Image
-                            source={{ uri: item.thumbnail }}
-                            style={styles.historyThumbnail}
-                            resizeMode="cover"
-                          />
-                          <View style={styles.completedOverlay}>
-                            <Ionicons name="checkmark-circle" size={24} color="#10b981" />
-                          </View>
-                        </View>
-                      ) : (
-                        <View style={[styles.fileIconContainer, { width: 100, height: 60, borderRadius: 8 }]}>
-                          <Ionicons name="checkmark-circle" size={28} color="#10b981" />
-                        </View>
-                      )}
-                      <View style={styles.downloadInfo}>
-                        <Text style={styles.downloadFilename} numberOfLines={2}>{item.title}</Text>
-                        <View style={styles.downloadMeta}>
-                          <Text style={styles.downloadSize}>{formatDuration(item.duration)}</Text>
-                          <Text style={styles.downloadDate}>{formatTimeAgo(item.lastPlayed)}</Text>
-                        </View>
-                      </View>
-                    </View>
-                    <View style={styles.downloadActions}>
-                      <TouchableOpacity
-                        style={styles.actionButton}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          resumeFromHistory({ ...item, currentTime: 0 });
-                        }}
-                      >
-                        <Ionicons name="refresh" size={20} color="#6366f1" />
-                        <Text style={styles.actionText}>Ver de nuevo</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.actionButton}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          deletePlaybackItem(item.id);
-                        }}
-                      >
-                        <Ionicons name="close" size={20} color="#ef4444" />
-                        <Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </TouchableOpacity>
-                ))}
-              </>
-            )}
-
-            {playbackHistory.length === 0 && (
-              <View style={styles.emptyState}>
-                <Ionicons name="play-circle-outline" size={64} color="#475569" />
-                <Text style={styles.emptyTitle}>Sin historial</Text>
-                <Text style={styles.emptyText}>
-                  Los videos que veas aparecerán aquí para que puedas continuar donde lo dejaste.
-                </Text>
-              </View>
-            )}
+            {playbackHistory.filter(h => !h.completed).length > 0 && (<><Text style={styles.sectionTitle}>Sin terminar</Text>{playbackHistory.filter(h => !h.completed).map(item => (<TouchableOpacity key={item.id} style={styles.downloadItem} onPress={() => resumeFromHistory(item)} activeOpacity={0.7}><View style={styles.downloadRow}>{item.thumbnail ? (<View style={styles.thumbnailContainer}><Image source={{ uri: item.thumbnail }} style={styles.historyThumbnail} resizeMode="cover" /><View style={styles.playOverlay}><Ionicons name="play" size={24} color="#fff" /></View><View style={styles.durationBadge}><Text style={styles.durationText}>{formatDuration(item.currentTime)} / {formatDuration(item.duration)}</Text></View></View>) : (<View style={[styles.fileIconContainer, { width: 100, height: 60, borderRadius: 8 }]}><Ionicons name="videocam" size={28} color="#6366f1" /></View>)}<View style={styles.downloadInfo}><Text style={styles.downloadFilename} numberOfLines={2}>{item.title}</Text><View style={styles.downloadMeta}><Text style={styles.downloadSpeed}>{item.progress}% visto</Text><Text style={styles.downloadDate}>{formatTimeAgo(item.lastPlayed)}</Text></View><View style={styles.historyProgressBg}><View style={[styles.historyProgressBar, { width: `${item.progress}%` }]} /></View></View></View><View style={styles.downloadActions}><TouchableOpacity style={styles.actionButton} onPress={(e) => { e.stopPropagation(); resumeFromHistory(item); }}><Ionicons name="play" size={20} color="#10b981" /><Text style={[styles.actionText, { color: '#10b981' }]}>Continuar</Text></TouchableOpacity><TouchableOpacity style={styles.actionButton} onPress={(e) => { e.stopPropagation(); deletePlaybackItem(item.id); }}><Ionicons name="close" size={20} color="#ef4444" /><Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text></TouchableOpacity></View></TouchableOpacity>))}</>)}
+            {playbackHistory.filter(h => h.completed).length > 0 && (<><Text style={styles.sectionTitle}>Vistos recientemente</Text>{playbackHistory.filter(h => h.completed).map(item => (<TouchableOpacity key={item.id} style={[styles.downloadItem, { opacity: 0.7 }]} onPress={() => resumeFromHistory({ ...item, currentTime: 0 })} activeOpacity={0.7}><View style={styles.downloadRow}>{item.thumbnail ? (<View style={styles.thumbnailContainer}><Image source={{ uri: item.thumbnail }} style={styles.historyThumbnail} resizeMode="cover" /><View style={styles.completedOverlay}><Ionicons name="checkmark-circle" size={24} color="#10b981" /></View></View>) : (<View style={[styles.fileIconContainer, { width: 100, height: 60, borderRadius: 8 }]}><Ionicons name="checkmark-circle" size={28} color="#10b981" /></View>)}<View style={styles.downloadInfo}><Text style={styles.downloadFilename} numberOfLines={2}>{item.title}</Text><View style={styles.downloadMeta}><Text style={styles.downloadSize}>{formatDuration(item.duration)}</Text><Text style={styles.downloadDate}>{formatTimeAgo(item.lastPlayed)}</Text></View></View></View><View style={styles.downloadActions}><TouchableOpacity style={styles.actionButton} onPress={(e) => { e.stopPropagation(); resumeFromHistory({ ...item, currentTime: 0 }); }}><Ionicons name="refresh" size={20} color="#6366f1" /><Text style={styles.actionText}>Ver de nuevo</Text></TouchableOpacity><TouchableOpacity style={styles.actionButton} onPress={(e) => { e.stopPropagation(); deletePlaybackItem(item.id); }}><Ionicons name="close" size={20} color="#ef4444" /><Text style={[styles.actionText, { color: '#ef4444' }]}>Quitar</Text></TouchableOpacity></View></TouchableOpacity>))}</>)}
+            {playbackHistory.length === 0 && (<View style={styles.emptyState}><Ionicons name="play-circle-outline" size={64} color="#475569" /><Text style={styles.emptyTitle}>Sin historial</Text><Text style={styles.emptyText}>Los videos que veas aparecerán aquí para que puedas continuar donde lo dejaste.</Text></View>)}
           </ScrollView>
         </View>
       )}
